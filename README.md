@@ -14,6 +14,17 @@ Pre-built checkpoint ready to download and run.
 </p>
 </div>
 
+> *"We set out to run a powerful open-source model that could take advantage
+> of the latest in KV caching and the high-performance MoE architecture in
+> Gemma 4. Along the way we discovered that the public FP8 checkpoints were
+> broken — a module-to-linear incompatibility meant the quantized experts
+> never actually loaded. So we built our own FP8 bridge, and then the
+> tooling around it: benchmarks, parity gates, profiling. What started as
+> a workaround became something we want to reuse and share with the
+> community."*
+>
+> — Steve Antonakakis, AeyeOps
+
 ---
 
 # aeo-quant

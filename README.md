@@ -1,5 +1,5 @@
 <div align="center">
-<h2>Gemma 4 26B-A4B — FP8 on a Single GPU</h2>
+<h2>Gemma 4 26B-A4B — FP8 w/ TurboQuant KV!</h2>
 <p>
 Full 26B MoE model in <strong>26.9 GB VRAM</strong> using FP8 quantized experts
 and <a href="https://pypi.org/project/turboquant/">TurboQuant</a> 4-bit KV cache.<br>

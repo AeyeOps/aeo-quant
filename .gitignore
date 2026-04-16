@@ -29,4 +29,3 @@ results/
 .claude/
 
 # Parity baselines (generated locally)
-tests/fixtures/

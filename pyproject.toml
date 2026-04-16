@@ -1,6 +1,6 @@
 [project]
 name = "aeo-quant"
-version = "0.1.2"
+version = "0.1.3"
 description = "AeyeOps quantization toolkit — model evaluation, benchmarking, and quantization bridges"
 requires-python = ">=3.12"
 license = "Apache-2.0"
@@ -9,7 +9,7 @@ dependencies = []
 [project.optional-dependencies]
 gpu = ["torch>=2.4", "psutil>=5.9"]
 bridges = ["aeo-quant[gpu]", "transformers>=4.45", "accelerate>=0.30", "safetensors>=0.4", "turboquant>=0.2.0"]
-plots = ["matplotlib>=3.8"]
+plots = ["matplotlib>=3.8", "openpyxl>=3.1"]
 all = ["aeo-quant[bridges]", "aeo-quant[plots]"]
 dev = ["pytest>=8.0", "ruff>=0.8"]
 

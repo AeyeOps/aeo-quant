@@ -19,7 +19,6 @@ import ast
 import os
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 
 import torch
@@ -27,7 +26,7 @@ from transformers import AutoTokenizer
 
 import aeo_quant  # noqa: F401
 from aeo_quant.bridges.gemma4.loader import load_gemma4_fp8
-from aeo_quant.core.config import load_dotenv, setup_cuda_allocator
+from aeo_quant.core.config import load_dotenv, results_dir, setup_cuda_allocator
 from aeo_quant.gpu.memory import CudaTimer, mem_report
 
 load_dotenv()
@@ -63,9 +62,7 @@ def main() -> int:
         print("[FATAL] CUDA not available", file=sys.stderr)
         return 2
 
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    results_dir = Path(f"results/compile/{ts}")
-    results_dir.mkdir(parents=True, exist_ok=True)
+    rd = results_dir("compile")
 
     print(f"[compile] device: {torch.cuda.get_device_name(0)}")
     print(f"[compile] torch: {torch.__version__}")
@@ -134,9 +131,9 @@ def main() -> int:
     decoded = tokenizer.decode(new_ids, skip_special_tokens=True)
 
     # Save parity result
-    parity_path = results_dir / "parity.txt"
+    parity_path = rd / "parity.txt"
     parity_path.write_text(
-        f"# compile_probe {ts}\n"
+        f"# compile_probe {rd.name}\n"
         f"# gen_tokens: {len(new_ids)}\n"
         f"# all_token_ids: {new_ids}\n"
         f"# ---\n"
@@ -211,7 +208,7 @@ def main() -> int:
 
     # Save timing
     import json
-    timing_path = results_dir / "timing.json"
+    timing_path = rd / "timing.json"
     with open(timing_path, "w") as f:
         json.dump({
             "compile_mode": "reduce-overhead",
@@ -223,7 +220,7 @@ def main() -> int:
             "generated_tokens": n_gen,
             "prompt_tokens": n_prompt,
         }, f, indent=2)
-    print(f"[compile] results saved to {results_dir}")
+    print(f"[compile] results saved to {rd}")
 
     return 0
 

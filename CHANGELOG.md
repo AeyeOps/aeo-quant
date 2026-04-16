@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.3] - 2026-04-16
+
+### Added
+
+- `results_dir(category, timestamped=True)` in `core/config.py` — SDK
+  utility for timestamped results directories. Honors `RESULTS_DIR` env
+  var as override. Replaces per-script boilerplate.
+- `Tee` class in `core/writers.py` — multi-stream writer for
+  stdout + log file tee. Replaces identical `_Tee` classes that were
+  copy-pasted across example scripts.
+- `openpyxl>=3.1` added to `plots` optional dependency group.
+
+### Changed
+
+- **All example scripts now use `results_dir()`** — timestamped output
+  directories created via the SDK instead of per-script `Path()` +
+  `mkdir()` + `strftime` boilerplate. Prevents results from being
+  overwritten between runs.
+- Removed unused `datetime` imports from `compile_probe.py`,
+  `profile_generate.py`, and `reasoning_check.py`.
+
+---
+
 ## [0.1.2] - 2026-04-16
 
 ### Added

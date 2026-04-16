@@ -31,7 +31,7 @@ from transformers import AutoTokenizer
 
 import aeo_quant  # noqa: F401 — triggers numpy compat shim
 from aeo_quant.bridges.gemma4.loader import load_gemma4_fp8
-from aeo_quant.core.config import load_dotenv, setup_cuda_allocator
+from aeo_quant.core.config import load_dotenv, results_dir, setup_cuda_allocator
 
 load_dotenv()
 setup_cuda_allocator()
@@ -48,7 +48,7 @@ PROMPT = (
     "Show the full implementation with type hints."
 )
 
-RESULTS_DIR = Path("results/parity")
+RESULTS_DIR = results_dir("parity", timestamped=False)
 BASELINE_PATH = Path("tests/fixtures/parity_baseline.txt")
 
 

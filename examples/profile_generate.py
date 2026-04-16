@@ -19,7 +19,6 @@ import json
 import os
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 
 # AEO_MOE_TRACE is an all-or-nothing switch: NVTX markers (emitted from
@@ -27,9 +26,8 @@ from pathlib import Path
 # the process. If the switch is on but nsys isn't attached, re-exec under it
 # so the markers actually land in a trace. Run under nsys already -> skip.
 if os.environ.get("AEO_MOE_TRACE") == "1" and "NSYS_PROFILING_SESSION_ID" not in os.environ:
-    _ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    _outdir = Path("results/nsys") / _ts
-    _outdir.mkdir(parents=True, exist_ok=True)
+    from aeo_quant.core.config import results_dir as _results_dir
+    _outdir = _results_dir("nsys")
     os.execvp("nsys", [
         "nsys", "profile",
         "--trace=cuda,nvtx",
@@ -42,7 +40,8 @@ from transformers import AutoTokenizer
 
 import aeo_quant  # noqa: F401 — triggers np.trapz compat shim before numpy is used
 from aeo_quant.bridges.gemma4.loader import load_gemma4_fp8
-from aeo_quant.core.config import load_dotenv, setup_cuda_allocator
+from aeo_quant.core.config import load_dotenv, results_dir, setup_cuda_allocator
+from aeo_quant.core.writers import Tee
 from aeo_quant.gpu.memory import CudaTimer, mem_report
 
 load_dotenv()
@@ -62,19 +61,7 @@ GEN_TOKENS = int(os.environ.get("GEN_TOKENS", "100"))
 KV_BITS = int(os.environ.get("KV_BITS", "4"))
 PROFILE_TRACE = os.environ.get("PROFILE_TRACE", "0") != "0"
 COMPARE_KV = os.environ.get("COMPARE_KV", "0") != "0"
-RESULTS_DIR = Path(f"results/profiling/{datetime.now().strftime('%Y%m%d-%H%M%S')}")
-
-
-class _Tee:
-    def __init__(self, *streams):
-        self.streams = streams
-    def write(self, data):
-        for s in self.streams:
-            s.write(data)
-            s.flush()
-    def flush(self):
-        for s in self.streams:
-            s.flush()
+RESULTS_DIR = results_dir("profiling")
 
 PROMPT = (
     "You are a senior Python engineer.\n\n"
@@ -272,8 +259,8 @@ def main() -> None:
 
     _log = open(RESULTS_DIR / "stdout.log", "w")  # noqa: SIM115 — lifetime = process
     atexit.register(_log.close)
-    sys.stdout = _Tee(sys.__stdout__, _log)
-    sys.stderr = _Tee(sys.__stderr__, _log)
+    sys.stdout = Tee(sys.__stdout__, _log)
+    sys.stderr = Tee(sys.__stderr__, _log)
 
     if not torch.cuda.is_available():
         print("[FATAL] CUDA not available — GPU-only.", file=sys.stderr)

@@ -28,6 +28,22 @@ def _extract_assistant_text(segments: list[Segment] | None) -> str | None:
     return "".join(parts)
 
 
+class Tee:
+    """Write to multiple streams simultaneously (e.g. stdout + log file)."""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for s in self.streams:
+            s.write(data)
+            s.flush()
+
+    def flush(self):
+        for s in self.streams:
+            s.flush()
+
+
 class JSONLWriter:
     """Simple JSONL append writer. Opens in append mode, flushes on every write.
 

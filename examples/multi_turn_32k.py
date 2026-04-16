@@ -43,7 +43,7 @@ from aeo_quant.bridges.gemma4.template import incremental_turn_tokens
 from aeo_quant.core.coherence import check_output_coherent
 
 # .env is the final authority — overrides anything already in the shell
-from aeo_quant.core.config import load_dotenv, setup_cuda_allocator
+from aeo_quant.core.config import load_dotenv, results_dir, setup_cuda_allocator
 from aeo_quant.core.viewer import generate_html
 from aeo_quant.core.writers import CSVWriter, JSONLWriter, TranscriptWriter
 from aeo_quant.gpu.memory import (
@@ -76,7 +76,7 @@ MAX_TURNS = int(os.environ.get("MAX_TURNS", "0")) or None
 LIVE = os.environ.get("LIVE", "1") != "0"
 VERBOSE_THINK = os.environ.get("VERBOSE_THINK", "0") != "0"
 
-RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results/context_scaling_32k"))
+RESULTS_DIR = results_dir("context_scaling_32k")
 
 FP8_CHECKPOINT = os.environ.get("FP8_CHECKPOINT")
 if not FP8_CHECKPOINT:

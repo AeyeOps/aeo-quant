@@ -1,4 +1,4 @@
-"""Configuration helpers — .env loading and environment setup.
+"""Configuration helpers — .env loading, environment setup, results paths.
 
 Stdlib only — no third-party dependencies.
 """
@@ -6,6 +6,7 @@ Stdlib only — no third-party dependencies.
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from pathlib import Path
 
 
@@ -80,3 +81,20 @@ def load_dotenv(path: str | Path = ".env", *, override: bool = True) -> int:
 def setup_cuda_allocator(config: str = "expandable_segments:True") -> None:
     """Set PYTORCH_CUDA_ALLOC_CONF if not already set."""
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", config)
+
+
+def results_dir(category: str, *, timestamped: bool = True) -> Path:
+    """Create and return a results directory.
+
+    Default layout: ``results/{category}/{YYYYMMDD-HHMMSS}/``.
+    Honors the ``RESULTS_DIR`` env var as an override.
+    """
+    override = os.environ.get("RESULTS_DIR")
+    if override:
+        d = Path(override)
+    else:
+        d = Path("results") / category
+        if timestamped:
+            d = d / datetime.now().strftime("%Y%m%d-%H%M%S")
+    d.mkdir(parents=True, exist_ok=True)
+    return d

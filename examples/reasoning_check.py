@@ -32,7 +32,6 @@ import atexit
 import json
 import os
 import sys
-from datetime import datetime
 from pathlib import Path
 
 import torch
@@ -40,7 +39,8 @@ from transformers import AutoTokenizer
 
 import aeo_quant  # noqa: F401
 from aeo_quant.bridges.gemma4.loader import load_gemma4_fp8
-from aeo_quant.core.config import load_dotenv, setup_cuda_allocator
+from aeo_quant.core.config import load_dotenv, results_dir, setup_cuda_allocator
+from aeo_quant.core.writers import Tee
 from aeo_quant.gpu.memory import CudaTimer, mem_report
 
 load_dotenv()
@@ -51,20 +51,8 @@ TOKENIZER_ID = os.environ.get("TOKENIZER_ID", "google/gemma-4-26B-A4B-it")
 KV_BITS = int(os.environ.get("KV_BITS", "4"))
 GEN_TOKENS = int(os.environ.get("GEN_TOKENS", "500"))
 
-RESULTS_DIR = Path(f"results/reasoning/{datetime.now().strftime('%Y%m%d-%H%M%S')}")
+RESULTS_DIR = results_dir("reasoning")
 BASELINE_DIR = Path(f"results/reasoning/baseline_{KV_BITS}bit")
-
-
-class _Tee:
-    def __init__(self, *streams):
-        self.streams = streams
-    def write(self, data):
-        for s in self.streams:
-            s.write(data)
-            s.flush()
-    def flush(self):
-        for s in self.streams:
-            s.flush()
 
 
 PROMPTS = [
@@ -193,8 +181,8 @@ def main() -> int:
 
     _log = open(RESULTS_DIR / "stdout.log", "w")  # noqa: SIM115
     atexit.register(_log.close)
-    sys.stdout = _Tee(sys.__stdout__, _log)
-    sys.stderr = _Tee(sys.__stderr__, _log)
+    sys.stdout = Tee(sys.__stdout__, _log)
+    sys.stderr = Tee(sys.__stderr__, _log)
 
     print(f"[reasoning] device: {torch.cuda.get_device_name(0)}")
     print(f"[reasoning] kv_bits: {KV_BITS}")

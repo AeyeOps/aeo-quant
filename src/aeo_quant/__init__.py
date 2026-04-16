@@ -1,0 +1,16 @@
+"""AeyeOps quantization toolkit — model evaluation, benchmarking, and quantization bridges."""
+
+__version__ = "0.1.0"
+
+# Compat shim: turboquant 0.2.0 uses np.trapz, removed in numpy 2.x
+try:
+    import numpy as np
+    if not hasattr(np, "trapz"):
+        np.trapz = np.trapezoid  # type: ignore[attr-defined]
+except ImportError:
+    pass  # numpy not installed
+
+# Core re-exports (stdlib only — always available)
+from aeo_quant.core.coherence import check_output_coherent
+from aeo_quant.core.context import trim_history_to_budget
+from aeo_quant.core.writers import CSVWriter, TranscriptWriter

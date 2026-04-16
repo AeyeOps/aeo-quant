@@ -1,0 +1,29 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Results (runtime output)
+results/
+
+# Local git worktrees
+.worktree
+.worktrees/
+
+# Local tooling (session state, agent scratch, etc.)
+.claude/

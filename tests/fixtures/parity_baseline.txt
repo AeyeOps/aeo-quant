@@ -1,0 +1,11 @@
+# parity_check 20260415-171616
+# gen_tokens: 50
+# all_token_ids: [100, 45518, 108, 236829, 139, 35559, 236787, 7803, 496, 8583, 236772, 12977, 13546, 4209, 15048, 236761, 107, 236829, 139, 27144, 236787, 107, 140, 236829, 139, 53058, 236772, 5140, 14860, 236761, 107, 140, 236829, 139, 6804, 32735, 236761, 107, 140, 236829, 139, 2866, 13455, 568, 721, 4209, 653, 810, 15048, 5585]
+# ---
+thought
+
+*   Goal: Design a thread-safe priority task queue.
+*   Features:
+    *   Priority-based execution.
+    *   Task cancellation.
+    *   Timeouts (per task or per queue operation

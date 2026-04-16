@@ -304,3 +304,20 @@ Two memories saved to help future sessions catch this class of mistake earlier:
 ### When the cache *would* make sense again
 
 If CUTLASS/FlashInfer sm_121 bugs get fixed and we switch to native FP4 inference, we'd keep NVFP4 weights on CUDA (not convert to FP8). At that point the cache question becomes moot — there's no conversion to cache. Current `_convert_nvfp4_experts_to_fp8` becomes dead code we'd remove.
+
+---
+
+## Roadmap — next decode-speed optimizations
+
+Scope: `transformers.generate()` + our bridge, GB10, no extra memory pressure unless explicitly noted. Baseline to beat: 10.08 tok/s (FP8 and NVFP4, identical compute path).
+
+| # | Optimization | Expected gain | Memory delta | Confidence | Risk / notes |
+|---|---|---|---|---|---|
+| R1 | Prompt lookup decoding (`generate(prompt_lookup_num_tokens=N)`) | 1.3–2× on repetitive / long-context workloads | ~0 | High | transformers-native, zero new code, A/B via env var; quality is bit-exact (verifier is the same model) |
+| R2 | Native NVFP4 matmul (torchao probe first; own Triton kernel if probe fails) | up to ~5× (community NVFP4 ceiling ≈ 52 tok/s on same hw) | ~0 (keeps FP4 in GPU mem) | Medium — no sm_121 drop-in exists per 2026-04-16 survey | Spec: [`plans/2026-04-16-native-nvfp4-matmul.md`](./plans/2026-04-16-native-nvfp4-matmul.md). **Prereq:** 20-min torchao `_addmm_nvfp4_dispatch` probe (`examples/probe_nvfp4_torchao.py`) to decide between zero-code integration vs custom Triton kernel. KB: `kb/nvfp4-blackwell-research.md` § "Native NVFP4 matmul path on sm_121". |
+| R3 | Assisted decoding (`generate(assistant_model=small_draft)`) | 2–4× on reasoning-heavy runs | +1–2 GB (draft model) | High value, medium confidence | transformers-native; requires a vocabulary-compatible draft; the one optimization that *adds* memory but the trade is decisively worth it |
+| R4 | Static KV cache + CUDA graph decode | 2–4× on standard stacks | ~0 | Low for us — likely blocked | `TurboQuantCache` is a `DynamicCache` subclass with O(T)-per-step dequant; probably can't be graph-captured without dropping TurboQuant |
+
+**Execution order (proposed):** R1 first (cheapest signal), R2 torchao probe in parallel (20 min, one expert, no full-model load), then either wire torchao or commit to the Triton kernel plan. R3 after R2 lands. R4 stays on the list but won't be touched until/unless TurboQuant scope changes.
+
+**Out of scope reminder:** anything that requires switching backends (vLLM, TRT-LLM, llama.cpp, FlashInfer-as-backend) is not on this roadmap. See `feedback_aeo_quant_transformers_only`.

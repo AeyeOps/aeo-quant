@@ -61,3 +61,42 @@ Removed in v0.1.5. Every NVFP4 load does fresh conversion. Full write-up in
 `docs/gemma4-fp8-optimization.md` Step 6.
 
 Lesson: when you optimize a cost, re-evaluate cached bypasses of that cost.
+
+## Native NVFP4 matmul path on sm_121 — 2026-04-16 survey
+
+**Bottom line.** No drop-in NVFP4 block-scaled matmul kernel exists today that we can import, call from our transformers-path `forward()`, and that is verified on sm_121 with our checkpoint layout (packed uint8, fp8_e4m3 per-16 block scale, fp32 per-tensor scale). The viable path is write our own Triton kernel from the Triton `tl.dot_scaled` tutorial as the starting base. Before committing to that, a 20-minute torchao-via-cuBLAS probe can tell us whether a zero-code alternative exists.
+
+### Candidate inventory
+
+| Candidate | Install | CC advertised | Block size | Scale dtypes | Verdict | Notes / evidence |
+|---|---|---|---|---|---|---|
+| Triton `tl.dot_scaled` (tutorial 10) | `pip install triton` ≥ nightly with PTX 8.7 | sm_100/sm_101 documented; sm_120/121 path hits `matmul_ogs` guard | 16 (NVFP4), 32 (MXFP4) | fp8_e4m3 *and* e8m0 uint8 | **Best base — adapt** | Issues E2M1 unpack + block-scale apply for free via `tcgen05.mma`. Wrapping layer `matmul_ogs` throws *"Must use persistent kernel and be TMA-compliant for native MXFP"* on Grace Blackwell — triton#8548 closed Oct 2025, fix on main, not yet in PyTorch 2.11 bundle. Fork the tutorial kernel directly; don't route through `matmul_ogs`. |
+| torchao NVFP4 (`_addmm_nvfp4_dispatch` on `NVFP4Tensor`) | `pip install torchao` | No explicit gate; routes through `torch._scaled_mm` → cuBLAS `fp4_e2m1fn_x2` | 16 | fp8_e4m3 (swizzled or plain) | **Probe first** | Layout matches ours. cuBLAS fp4 path reported working on sm_120 B200 but **not verified on sm_121**. A 20-minute one-expert probe would settle it. If it runs clean, this is R2 with zero kernel code. |
+| HF `kernels-community/triton_kernels` | `pip install kernels` + hub load | advertises CC ≥ 9.0 for native FP4 path | 32 (MXFP4 only) | e8m0 uint8 | Not usable | MXFP4 semantics (block_size 32, e8m0 scale), not NVFP4. Same `matmul_ogs` guard. |
+| GemLite `A4W4_NVFP_dynamic` | `pip install gemlite` | "focus sm_120"; sm_121 not listed | 16 (claimed NVFP4) | fp8_e4m3 implied | Reference / probe | Dynamic-activation oriented; sm_121 kernel path unverified. |
+| Veitner NVFP4 GEMV, advpropsys/fp4-blackwell-bench | git clone | sm_100a only | 16 | fp8_e4m3 | Reference only | Useful for E2M1 unpack pattern and Blackwell tile/schedule shape. |
+
+### sm_121 compile target gotcha
+
+Vanilla `sm_121` and `sm_121a` **reject** the `tcgen05.mma` FP4 instructions. Per the NVIDIA dev forum (sm121 GB10 NVFP4 software-support thread), the required target is **`sm_121f`** (family mode). Any kernel built for this hardware must pass `-arch=sm_121f` — Triton nightly supports this target but the default pipeline often falls back to `sm_100a` and silently mis-lowers FP4 ops. Verify with `cuobjdump` after compile.
+
+### Shared-memory budget
+
+GB10 has **99 KiB smem per SM**, vs 228 KiB on B200. B200 default tiles for Triton NVFP4 kernels (typically 128×128×256 or 128×256×256 at `NUM_STAGES=3`) **will not fit**. Starting tile for GB10: **128×128×128 at `NUM_STAGES=2`**, then tune. Budget: ~54 KiB for A/B/C slices per stage at those dims. Hand-check before first compile.
+
+### Blockers on other stacks (reference, do not chase)
+
+- CUTLASS `BlockScaledMmaOp`: hardcoded `sm_100a` (CUTLASS#2800). C++ API works, Python DSL rejects sm_121.
+- FlashInfer `mm_fp4`: returns all zeros on sm_120 with cutlass backend, errors on cudnn/trtllm (FlashInfer#2577, open Feb 2026).
+- TensorRT-LLM FP4 GEMM: smem overflow on sm_121 (TRT-LLM#11368).
+
+### Key references
+
+- Triton tutorial 10 — Block Scaled Matmul: https://triton-lang.org/main/getting-started/tutorials/10-block-scaled-matmul.html
+- triton#8548 — MXFP4 TMA guard on Grace Blackwell
+- torchao NVFP4Tensor source: `pytorch/ao/blob/main/torchao/prototype/mx_formats/nvfp4_tensor.py`
+- PyTorch blog — Faster Diffusion on Blackwell (MXFP8/NVFP4 with diffusers + torchao)
+- NVIDIA dev forum — "SM121 (GB10) native NVFP4 compute — seeking guidance on software support"
+- NVIDIA dev forum — "tcgen05 FP4 support for DGX Spark GB10 sm121"
+- Veitner — NVFP4 GEMV: https://veitner.bearblog.dev/nvfp4-gemv/
+- advpropsys/fp4-blackwell-bench

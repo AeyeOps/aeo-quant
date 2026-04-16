@@ -10,12 +10,15 @@ Usage:
     uv run examples/parity_check.py        # generates; establishes baseline if absent
 
 Outputs:
-    results/parity/YYYYMMDD-HHMMSS.txt     # this run
-    results/parity/baseline.txt            # pinned baseline (first run)
+    results/parity/YYYYMMDD-HHMMSS/output.txt     # this run (per-run subdir, SDK-standard)
+    tests/fixtures/parity_baseline_{fp8,nvfp4}.txt  # per-format baseline
+
+Baselines are per-format. NVFP4 runs also report divergence vs the FP8 baseline
+as an informational quality delta (not a gate).
 
 Exit codes:
     0 — match OR baseline established
-    1 — divergence above 5% token mismatch
+    1 — divergence above 5% token mismatch vs own-format baseline
     2 — environment failure (no CUDA, no checkpoint, etc.)
 """
 from __future__ import annotations
@@ -24,7 +27,6 @@ import ast
 import os
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 
 import torch
@@ -52,8 +54,10 @@ PROMPT = (
     "Show the full implementation with type hints."
 )
 
-RESULTS_DIR = results_dir("parity", timestamped=False)
-BASELINE_PATH = Path("tests/fixtures/parity_baseline.txt")
+RESULTS_DIR = results_dir("parity")  # results/parity/YYYYMMDD-HHMMSS/
+BASELINE_DIR = Path("tests/fixtures")
+OWN_BASELINE = BASELINE_DIR / f"parity_baseline_{QUANT_FORMAT}.txt"
+FP8_BASELINE = BASELINE_DIR / "parity_baseline_fp8.txt"
 
 
 def load_token_ids(path: Path) -> list[int]:
@@ -131,10 +135,10 @@ def main() -> int:
     new_ids = outputs[0, n_prompt:].tolist()
     decoded = tokenizer.decode(new_ids, skip_special_tokens=True)
 
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    out_path = RESULTS_DIR / f"{ts}.txt"
+    out_path = RESULTS_DIR / "output.txt"
     out_path.write_text(
-        f"# parity_check {ts}\n"
+        f"# parity_check {RESULTS_DIR.name}\n"
+        f"# quant_format: {QUANT_FORMAT}\n"
         f"# gen_tokens: {len(new_ids)}\n"
         f"# all_token_ids: {new_ids}\n"
         f"# ---\n"
@@ -142,13 +146,25 @@ def main() -> int:
     )
     print(f"[parity] wrote {out_path}")
 
-    if not BASELINE_PATH.exists():
-        BASELINE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        BASELINE_PATH.write_text(out_path.read_text())
-        print(f"[parity] established baseline at {BASELINE_PATH}")
+    if not OWN_BASELINE.exists():
+        OWN_BASELINE.parent.mkdir(parents=True, exist_ok=True)
+        OWN_BASELINE.write_text(out_path.read_text())
+        print(f"[parity] established {QUANT_FORMAT} baseline at {OWN_BASELINE}")
+        if QUANT_FORMAT != "fp8" and FP8_BASELINE.exists():
+            _compare("vs fp8 (informational)", FP8_BASELINE, new_ids, fail=False)
         return 0
 
-    baseline_ids = load_token_ids(BASELINE_PATH)
+    own_rc = _compare(
+        f"vs {QUANT_FORMAT} baseline", OWN_BASELINE, new_ids, fail=True
+    )
+    if QUANT_FORMAT != "fp8" and FP8_BASELINE.exists():
+        _compare("vs fp8 (informational)", FP8_BASELINE, new_ids, fail=False)
+    return own_rc
+
+
+def _compare(label: str, baseline_path: Path, new_ids: list[int], *, fail: bool) -> int:
+    """Compare new_ids to baseline. Returns exit code; fail=False never returns 1."""
+    baseline_ids = load_token_ids(baseline_path)
     n = min(len(baseline_ids), len(new_ids))
     mismatches = sum(1 for a, b in zip(baseline_ids, new_ids, strict=False) if a != b)
     pct = 100 * mismatches / n if n else 0.0
@@ -159,15 +175,17 @@ def main() -> int:
             break
         max_prefix += 1
 
-    print(f"[parity] mismatches: {mismatches}/{n} ({pct:.1f}%)")
-    print(f"[parity] max matching prefix: {max_prefix} tokens")
+    print(f"[parity] {label}: mismatches {mismatches}/{n} ({pct:.1f}%), "
+          f"max matching prefix {max_prefix} tokens")
     if mismatches == 0:
-        print("[parity] PASS — byte-for-byte match with baseline")
+        print(f"[parity] {label}: PASS — byte-for-byte match")
         return 0
-    if pct > 5:
-        print(f"[parity] FAIL — divergence above 5% ({pct:.1f}%)")
+    if fail and pct > 5:
+        print(f"[parity] {label}: FAIL — divergence above 5% ({pct:.1f}%)")
         return 1
-    print(f"[parity] WARN — divergence below 5% threshold ({pct:.1f}%)")
+    print(f"[parity] {label}: "
+          + ("WARN" if fail else "delta")
+          + f" — divergence {pct:.1f}%")
     return 0
 
 

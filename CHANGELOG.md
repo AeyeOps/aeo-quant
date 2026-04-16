@@ -2,6 +2,43 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.7] - 2026-04-16
+
+### Changed
+
+- **`parity_check.py` — per-format baselines, SDK-aligned output path.**
+  Replaced the single shared `tests/fixtures/parity_baseline.txt` with
+  per-format files `parity_baseline_fp8.txt` and `parity_baseline_nvfp4.txt`.
+  Each format compares against its own baseline as the regression gate;
+  NVFP4 runs additionally compare against the FP8 baseline as an
+  informational quality delta (never fails the run). Fixes the prior
+  bug where whichever format ran last silently overwrote the other's
+  pinned reference.
+- **Parity output now uses the standard `results_dir()` timestamped
+  subdirectory pattern** (`results/parity/YYYYMMDD-HHMMSS/output.txt`),
+  matching `multi_turn_*`, `profile_generate`, `reasoning_check`,
+  `compile_probe`. The inline `datetime.strftime` was the last remaining
+  duplication of the SDK's timestamp helper; date/time format now lives
+  in one place (`core/config.py:results_dir`).
+
+### Added
+
+- **`docs/plans/2026-04-16-native-nvfp4-matmul.md`** — roadmap spec for
+  replacing the NVFP4→FP8 load-time conversion with a native NVFP4
+  block-scaled matmul on sm_121. Documents the Triton tutorial-10 base
+  kernel, the three required deltas (per-tensor fp32 scale fold-in,
+  `matmul_ogs` TMA guard bypass, `sm_121f` compile target), small-M
+  vs large-M tile split, and six ordered verification gates. Pre-gated
+  by a 20-minute torchao `_addmm_nvfp4_dispatch` probe to rule out a
+  zero-code integration path.
+- **`kb/nvfp4-blackwell-research.md`** — new section "Native NVFP4
+  matmul path on sm_121 — 2026-04-16 survey" with candidate kernel
+  inventory, sm_121 shared-memory budget notes (99 KiB vs B200's
+  228 KiB), and reference links.
+- **`docs/gemma4-fp8-optimization.md`** — roadmap table of next
+  decode-speed optimizations (R1 prompt lookup, R2 native NVFP4 matmul,
+  R3 assisted decoding, R4 static KV cache) scoped to transformers only.
+
 ## [0.1.6] - 2026-04-16
 
 ### Added

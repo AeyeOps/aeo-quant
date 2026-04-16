@@ -29,7 +29,6 @@ import os
 import sys
 import time
 from datetime import UTC, datetime
-from pathlib import Path
 
 import psutil
 import torch
@@ -53,11 +52,16 @@ from aeo_quant.gpu.memory import (
     enforce_cap,
     gb,
     mem_report,
+    preflight_memory,
 )
 from aeo_quant.plots.context_scaling import generate_dashboard
 from aeo_quant.prompts.project_arc import SYSTEM_MESSAGE, select_prompt
 
 load_dotenv()  # .env overrides shell env vars
+
+# Memory budget (unified LPDDR5X on GB10): load ~30 GB + compile warmup ~15 GB
+# + 32K KV growth + 15 GB safety. Fails fast if baseline too high.
+MIN_FREE_GB = 60.0
 setup_cuda_allocator()
 
 # ---------------------------------------------------------------------------
@@ -95,6 +99,7 @@ def preflight() -> None:
     if not CHECKPOINT.exists():
         print(f"[FATAL] checkpoint missing at {CHECKPOINT}.", file=sys.stderr)
         sys.exit(1)
+    preflight_memory(MIN_FREE_GB, label="multi_turn_32k")
 
     dev_name = torch.cuda.get_device_name(0)
     cc_major, cc_minor = torch.cuda.get_device_capability(0)

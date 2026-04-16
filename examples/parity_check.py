@@ -32,7 +32,11 @@ from transformers import AutoTokenizer
 
 import aeo_quant  # noqa: F401 — triggers numpy compat shim
 from aeo_quant.core.config import load_dotenv, quant_env, results_dir, setup_cuda_allocator
-from aeo_quant.gpu.memory import mem_report
+from aeo_quant.gpu.memory import mem_report, preflight_memory
+
+# Memory budget (unified LPDDR5X on GB10): load ~30 GB + torch.compile warmup
+# ~10-15 GB + 5 GB safety. Fails fast if baseline is too high.
+MIN_FREE_GB = 50.0
 
 load_dotenv()
 setup_cuda_allocator()
@@ -64,6 +68,7 @@ def main() -> int:
         f"[parity] QUANT_FORMAT={QUANT_FORMAT} CHECKPOINT={CHECKPOINT} KV_BITS={KV_BITS}",
         flush=True,
     )
+    preflight_memory(MIN_FREE_GB, label="parity")
     mem_report("parity:start")
 
     if not torch.cuda.is_available():

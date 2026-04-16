@@ -30,11 +30,15 @@ from safetensors.torch import save_file
 
 import aeo_quant  # noqa: F401 -- triggers np.trapz compat shim before numpy is used
 from aeo_quant.core.config import load_dotenv, setup_cuda_allocator
-from aeo_quant.gpu.memory import _GB, enforce_cap, gb, mem_report
+from aeo_quant.gpu.memory import _GB, enforce_cap, gb, mem_report, preflight_memory
 from aeo_quant.gpu.quant import quantize_3d_to_nvfp4
 
 load_dotenv()
 setup_cuda_allocator()
+
+# Memory budget (unified LPDDR5X on GB10): shard streaming peaks ~53 GB RSS.
+# Need enough headroom to load one source shard (~5 GB) and process it.
+MIN_FREE_GB = 60.0
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -60,6 +64,7 @@ _EXPERT_RE = re.compile(
 
 
 def main() -> None:
+    preflight_memory(MIN_FREE_GB, label="build_checkpoint_nvfp4")
     mem_report("start")
 
     if not torch.cuda.is_available():
@@ -132,7 +137,7 @@ def main() -> None:
         enforce_cap(f"before {shard_file}", VRAM_CAP_GB)
 
         with safe_open(str(shard_path), framework="pt", device="cpu") as f:
-            for key in f.keys():
+            for key in f.keys():  # noqa: SIM118 — safe_open requires .keys()
                 tensor = f.get_tensor(key)
                 m = _EXPERT_RE.match(key)
                 if m:

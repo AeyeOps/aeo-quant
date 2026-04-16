@@ -91,6 +91,48 @@ def enforce_cap(label: str, cap_gb: float) -> None:
         )
 
 
+def preflight_memory(min_available_gb: float, *, label: str = "preflight") -> None:
+    """Fail fast if insufficient memory headroom to safely run the workload.
+
+    On shared unified-memory systems (e.g. GB10), other processes can consume
+    enough of the pool that our workload's peak would push the system into
+    swap-thrashing or OOM territory.  Call at script start with the min
+    available memory your workload needs beyond baseline.
+
+    Prints a PASS line on success so operators can see the headroom; calls
+    ``sys.exit(2)`` on failure with a message explaining what to do.
+
+    Args:
+        min_available_gb: Minimum free memory required to proceed.
+        label: Script name or stage label for the log message.
+    """
+    import sys
+
+    vm = psutil.virtual_memory()
+    avail_gb = vm.available / _GB
+    used_gb = vm.used / _GB
+    total_gb = vm.total / _GB
+    if avail_gb < min_available_gb:
+        print(
+            f"[FATAL {label}] insufficient memory headroom: "
+            f"{avail_gb:.1f} GB available, need >= {min_available_gb:.1f} GB",
+            file=sys.stderr,
+        )
+        print(
+            f"[FATAL {label}] sys_used={used_gb:.1f} GB / "
+            f"{total_gb:.1f} GB total -- other processes are consuming too much. "
+            f"Free up memory or wait for other workloads to finish.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    print(
+        f"[{label}] memory headroom OK: {avail_gb:.1f} GB available "
+        f"(min {min_available_gb:.1f} GB needed, sys_used={used_gb:.1f} GB / "
+        f"{total_gb:.1f} GB)",
+        flush=True,
+    )
+
+
 class MemoryCapStoppingCriteria:
     """HuggingFace StoppingCriteria that halts generation when memory cap is exceeded.
 

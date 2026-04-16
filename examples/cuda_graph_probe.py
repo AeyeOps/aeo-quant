@@ -24,6 +24,10 @@ from transformers import AutoTokenizer
 import aeo_quant  # noqa: F401
 from aeo_quant.bridges.gemma4.loader import load_gemma4_fp8
 from aeo_quant.core.config import load_dotenv, setup_cuda_allocator
+from aeo_quant.gpu.memory import preflight_memory
+
+# Memory budget (unified LPDDR5X on GB10): FP8 load ~27 GB + graph capture overhead.
+MIN_FREE_GB = 50.0
 
 load_dotenv()
 setup_cuda_allocator()
@@ -40,6 +44,8 @@ def main() -> int:
     if not torch.cuda.is_available():
         print("[FATAL] CUDA not available", file=sys.stderr)
         return 2
+
+    preflight_memory(MIN_FREE_GB, label="cuda_graph_probe")
 
     print(f"[probe] device: {torch.cuda.get_device_name(0)}")
     print(f"[probe] loading model from {FP8_CHECKPOINT}")

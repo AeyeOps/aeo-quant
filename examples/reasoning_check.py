@@ -40,7 +40,11 @@ from transformers import AutoTokenizer
 import aeo_quant  # noqa: F401
 from aeo_quant.core.config import load_dotenv, quant_env, results_dir, setup_cuda_allocator
 from aeo_quant.core.writers import Tee
-from aeo_quant.gpu.memory import CudaTimer, mem_report
+from aeo_quant.gpu.memory import CudaTimer, mem_report, preflight_memory
+
+# Memory budget (unified LPDDR5X on GB10): load ~30 GB + torch.compile warmup
+# ~15 GB + 10 GB safety (longer decode than parity). Fails fast if baseline too high.
+MIN_FREE_GB = 55.0
 
 load_dotenv()
 setup_cuda_allocator()
@@ -168,6 +172,7 @@ def diff_against_baseline(prompt_info: dict, new_ids: list[int]):
 
 
 def main() -> int:
+    preflight_memory(MIN_FREE_GB, label="reasoning")
     if not torch.cuda.is_available():
         print("[FATAL] CUDA not available", file=sys.stderr)
         return 2

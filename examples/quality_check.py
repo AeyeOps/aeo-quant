@@ -26,7 +26,11 @@ import aeo_quant  # noqa: F401 — triggers np.trapz compat shim before numpy is
 from aeo_quant.bridges.gemma4.loader import load_gemma4_fp8
 from aeo_quant.core.coherence import check_output_coherent
 from aeo_quant.core.config import load_dotenv, setup_cuda_allocator
-from aeo_quant.gpu.memory import enforce_cap, mem_report
+from aeo_quant.gpu.memory import enforce_cap, mem_report, preflight_memory
+
+# Memory budget (unified LPDDR5X on GB10): load ~30 GB + torch.compile warmup
+# ~10-15 GB + 5 GB safety. Fails fast if baseline is too high.
+MIN_FREE_GB = 50.0
 
 load_dotenv()
 setup_cuda_allocator()
@@ -62,6 +66,7 @@ PROMPTS = [
 
 
 def main() -> None:
+    preflight_memory(MIN_FREE_GB, label="quality")
     mem_report("start")
 
     if not torch.cuda.is_available():

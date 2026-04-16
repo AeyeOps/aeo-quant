@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.6] - 2026-04-16
+
+### Added
+
+- **`preflight_memory(min_available_gb, *, label)`** in `gpu/memory.py` —
+  fail-fast check that refuses to start heavy workloads when the unified
+  memory pool doesn't have enough free headroom. Prevents the "system
+  buckling" scenario on shared GB10 where other processes have consumed
+  so much memory that our workload's peak would push into swap-thrashing
+  or OOM territory. Prints a PASS line on success so operators can see
+  the headroom; exits 2 with a clear message on failure.
+- All heavy example scripts now call `preflight_memory()` at startup
+  with workload-specific minimums (documented as `MIN_FREE_GB` constants):
+  - `parity_check.py`, `profile_generate.py`, `quality_check.py`,
+    `compile_probe.py`, `cuda_graph_probe.py` — 50 GB
+  - `reasoning_check.py` — 55 GB (longer decode)
+  - `multi_turn_16k.py`, `multi_turn_32k.py` — 60 GB (KV growth)
+  - `build_checkpoint.py`, `build_checkpoint_nvfp4.py` — 60 GB (~53 GB RSS peak)
+
+### Changed
+
+- Removed preexisting unused `pathlib.Path` imports from
+  `multi_turn_16k.py`, `multi_turn_32k.py`, and `profile_generate.py`.
+- `build_checkpoint*.py` — added `# noqa: SIM118` to `f.keys()` calls
+  (safetensors `safe_open` requires `.keys()` for iteration).
+
 ## [0.1.5] - 2026-04-16
 
 ### Removed

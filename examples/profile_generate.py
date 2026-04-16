@@ -19,7 +19,6 @@ import json
 import os
 import sys
 import time
-from pathlib import Path
 
 # AEO_MOE_TRACE is an all-or-nothing switch: NVTX markers (emitted from
 # aeo_quant.bridges.gemma4.modeling) only produce data when nsys is wrapping
@@ -41,7 +40,11 @@ from transformers import AutoTokenizer
 import aeo_quant  # noqa: F401 — triggers np.trapz compat shim before numpy is used
 from aeo_quant.core.config import load_dotenv, quant_env, results_dir, setup_cuda_allocator
 from aeo_quant.core.writers import Tee
-from aeo_quant.gpu.memory import CudaTimer, mem_report
+from aeo_quant.gpu.memory import CudaTimer, mem_report, preflight_memory
+
+# Memory budget (unified LPDDR5X on GB10): load ~30 GB + torch.compile warmup
+# ~10-15 GB + 5 GB safety. Fails fast if baseline is too high.
+MIN_FREE_GB = 50.0
 
 load_dotenv()
 setup_cuda_allocator()
@@ -259,6 +262,7 @@ def main() -> None:
         print("[FATAL] CUDA not available — GPU-only.", file=sys.stderr)
         sys.exit(1)
 
+    preflight_memory(MIN_FREE_GB, label="profile")
     mem_report("start")
 
     dev_name = torch.cuda.get_device_name(0)

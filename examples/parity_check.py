@@ -38,6 +38,7 @@ setup_cuda_allocator()
 
 FP8_CHECKPOINT = os.environ.get("FP8_CHECKPOINT")
 TOKENIZER_ID = os.environ.get("TOKENIZER_ID", "google/gemma-4-26B-A4B-it")
+KV_BITS = int(os.environ.get("KV_BITS", "4"))
 GEN_TOKENS = 50
 
 PROMPT = (
@@ -72,7 +73,7 @@ def main() -> int:
     model = load_gemma4_fp8(FP8_CHECKPOINT)
 
     from turboquant import TurboQuantCache
-    cache = TurboQuantCache(bits=4)
+    cache = TurboQuantCache(bits=KV_BITS)
 
     messages = [
         {"role": "system", "content": "You are a senior Python engineer."},

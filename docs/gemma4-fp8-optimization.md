@@ -194,6 +194,41 @@ Findings:
 
 E4M3 is already the right format. The 46% divergence from non-MoE FP8 quantization is a layer-sensitivity problem (cumulative error through 24 layers + LM head argmax sensitivity), not a format problem. Potential future directions: mixed precision (LM head stays bf16), finer-grained scaling (blockwise 1x128 or MXFP8 1x32), or NVFP4.
 
-### Not yet tested: TurboQuant 3-bit KV cache
+### Tested: TurboQuant 3-bit vs 4-bit KV cache
 
-Current configuration uses `TurboQuantCache(bits=4)`. TurboQuant's default is actually `bits=3` — we're more conservative than the library's own default. Dropping to 3-bit would give ~25% less KV cache memory (5.3x vs 4x compression) with negligible quality loss per TurboQuant benchmarks on 3B+ models. No code change in the library needed — just `bits=3`. Worth a parity check to verify on Gemma 4.
+TurboQuant supports `bits=1,2,3,4` (its default is actually `bits=3`). We tested 3-bit against 4-bit using two reasoning-intensive prompts designed to stress attention precision:
+
+1. **Math proof** — prove Sylow q-subgroup normality for groups of order p²q. Requires tracking abstract algebraic constraints across the full context.
+2. **Concurrent LRU cache** — find 4 interacting bugs (mutable default, race condition, deadlock-prone lock ordering, off-by-one). Requires reasoning about interleaved execution paths and shared mutable state.
+
+Each prompt generated 500 greedy tokens at `bits=4` and `bits=3`. Test harness: `examples/reasoning_check.py` (parameterized via `KV_BITS` env var, default 4).
+
+**Results:**
+
+| | 4-bit KV | 3-bit KV |
+|---|---|---|
+| Math proof | Correct, rigorous | Correct, rigorous |
+| LRU bugs | All 4 found, proper fixes | All 4 found, proper fixes |
+| Math tok/s | 9.30 | 9.28 |
+| LRU tok/s | 8.56 | 8.53 |
+| Math token match vs 4-bit | — | 14% (61-token prefix) |
+| LRU token match vs 4-bit | — | 2% (2-token prefix) |
+
+Both outputs are correct and coherent at 3-bit. The massive token divergence (86–98%) is cascade-driven — different phrasing at one point snowballs through greedy decode — not a quality failure. The reasoning and correctness are indistinguishable between 3-bit and 4-bit.
+
+**Memory sizing at 32K context:**
+
+Gemma 4 26B-A4B: 24 layers, 32 KV heads, 128 head dim. Per-token KV in bf16 = 393 KB.
+
+| KV cache | At 32K tokens | At 128K tokens |
+|---|---|---|
+| bf16 (no quant) | 12.6 GB | 50.3 GB |
+| TurboQuant 4-bit | ~3.15 GB | ~12.6 GB |
+| TurboQuant 3-bit | ~2.36 GB | ~9.4 GB |
+| Savings (3 vs 4) | 790 MB | 3.15 GB |
+
+**Decision: 4-bit stays as default.** At 32K context (our current target), TurboQuant 4-bit KV cache fits easily (~3.15 GB + 26.86 GB model = ~30 GB, well under the ~70 GB available on GB10). 3-bit saves 790 MB but doesn't improve decode speed. The quality is equivalent but the token-level divergence means parity checks would fail, making it harder to gate future optimizations.
+
+All example scripts accept `KV_BITS` as an env var so users can experiment with 3-bit (or 2-bit) at their discretion. Revisit 3-bit when pushing to 128K+ context where the 3.15 GB savings becomes meaningful.
+
+The reasoning check prompts (`examples/reasoning_check.py`) serve as the quality gate for any future KV cache changes. They test attention precision directly — both prompts require the model to hold and reference information from early in the context to produce correct output later.

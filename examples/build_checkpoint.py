@@ -21,16 +21,15 @@ import shutil
 import sys
 from pathlib import Path
 
-import aeo_quant  # noqa: F401 — triggers np.trapz compat shim before numpy is used
-import numpy as np
 import psutil
 import torch
 from huggingface_hub import snapshot_download
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+import aeo_quant  # noqa: F401 — triggers np.trapz compat shim before numpy is used
 from aeo_quant.core.config import load_dotenv, setup_cuda_allocator
-from aeo_quant.gpu.memory import _GB, enforce_cap, gb, mem_report, MemoryCapExceeded
+from aeo_quant.gpu.memory import _GB, enforce_cap, gb, mem_report
 from aeo_quant.gpu.quant import quantize_3d_to_fp8
 
 load_dotenv()
@@ -111,7 +110,8 @@ def main() -> None:
         save_file(out_shard_tensors, str(out_path))
         for key in out_shard_tensors:
             out_weight_map[key] = shard_name
-        print(f"  wrote {shard_name} ({len(out_shard_tensors)} tensors, {out_shard_bytes / _GB:.2f} GB)")
+        n_tensors = len(out_shard_tensors)
+        print(f"  wrote {shard_name} ({n_tensors} tensors, {out_shard_bytes / _GB:.2f} GB)")
         out_shard_tensors = {}
         out_shard_bytes = 0
 
@@ -131,7 +131,7 @@ def main() -> None:
         enforce_cap(f"before {shard_file}", VRAM_CAP_GB)
 
         with safe_open(str(shard_path), framework="pt", device="cpu") as f:
-            for key in f.keys():
+            for key in f:
                 tensor = f.get_tensor(key)
                 m = _EXPERT_RE.match(key)
                 if m:

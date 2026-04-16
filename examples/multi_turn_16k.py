@@ -28,20 +28,22 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
-import aeo_quant  # noqa: F401 — triggers np.trapz compat shim before numpy is used
-import numpy as np
 import psutil
 import torch
 from transformers import AutoTokenizer
 
+import aeo_quant  # noqa: F401 — triggers np.trapz compat shim before numpy is used
 from aeo_quant.bridges.gemma4.loader import load_gemma4_fp8
 from aeo_quant.bridges.gemma4.parser import GEMMA4_PARSER
 from aeo_quant.bridges.gemma4.streamer import LiveStreamer
 from aeo_quant.bridges.gemma4.template import incremental_turn_tokens
 from aeo_quant.core.coherence import check_output_coherent
+
+# .env is the final authority — overrides anything already in the shell
+from aeo_quant.core.config import load_dotenv, setup_cuda_allocator
 from aeo_quant.core.viewer import generate_html
 from aeo_quant.core.writers import CSVWriter, JSONLWriter, TranscriptWriter
 from aeo_quant.gpu.memory import (
@@ -55,9 +57,6 @@ from aeo_quant.gpu.memory import (
 from aeo_quant.plots.context_scaling import generate_dashboard
 from aeo_quant.prompts.project_arc import SYSTEM_MESSAGE, select_prompt
 
-# .env is the final authority — overrides anything already in the shell
-from aeo_quant.core.config import load_dotenv, setup_cuda_allocator
-
 load_dotenv()  # .env overrides shell env vars
 setup_cuda_allocator()
 
@@ -67,7 +66,7 @@ setup_cuda_allocator()
 VRAM_CAP_GB = float(os.environ.get("VRAM_CAP_GB", "90.0"))
 TOKENIZER_ID = os.environ.get("TOKENIZER_ID", "google/gemma-4-26B-A4B-it")
 MAX_NEW_TOKENS = 10000
-TURBOQUANT_BITS = 4
+KV_BITS = int(os.environ.get("KV_BITS", "4"))
 TEMPLATE_OVERHEAD_PER_TURN = 20
 MIN_USEFUL_GENERATION = 512
 MEMORY_CHECK_EVERY_N_TOKENS = 100
@@ -169,7 +168,7 @@ def run_context_target(target, model, tokenizer, TurboQuantCache, model_weight_g
     }
 
     # KV cache persists across turns
-    cache = TurboQuantCache(bits=TURBOQUANT_BITS)
+    cache = TurboQuantCache(bits=KV_BITS)
     cache_seq_len = 0
 
     try:
@@ -185,7 +184,9 @@ def run_context_target(target, model, tokenizer, TurboQuantCache, model_weight_g
             break
 
         fill_ratio = context_tokens / target if target > 0 else 0
-        prompt_label, prompt_text, prompt_difficulty = select_prompt(turn, fill_ratio, band_counters)
+        prompt_label, prompt_text, prompt_difficulty = select_prompt(
+            turn, fill_ratio, band_counters,
+        )
         print(f"\n[turn {turn}] {prompt_label} ({prompt_difficulty}) fill={fill_ratio:.1%}")
 
         conversation_history.append({"role": "user", "content": prompt_text})
@@ -336,7 +337,7 @@ def run_context_target(target, model, tokenizer, TurboQuantCache, model_weight_g
             record = {
                 "run_target": target,
                 "turn": turn,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
                 "prompt_label": prompt_label,
                 "prompt_difficulty": prompt_difficulty,
                 "user_tokens": user_tokens,
@@ -350,12 +351,16 @@ def run_context_target(target, model, tokenizer, TurboQuantCache, model_weight_g
                 "answer_tokens": answer_tokens,
                 "unknown_tokens": unknown_tokens,
                 "thinking_ratio": round(thinking_ratio, 4),
-                "context_tokens_before": context_tokens - user_tokens - answer_tokens - TEMPLATE_OVERHEAD_PER_TURN,
+                "context_tokens_before": (
+                    context_tokens - user_tokens - answer_tokens - TEMPLATE_OVERHEAD_PER_TURN
+                ),
                 "context_tokens_after": context_tokens,
                 "context_fill_ratio": round(context_tokens / target, 4),
                 "total_time_s": round(gen_time, 2),
                 "tok_per_s": round(tok_per_s, 2),
-                "ttft_s": round(streamer.ttft, 4) if (streamer and streamer.ttft is not None) else None,
+                "ttft_s": (
+                    round(streamer.ttft, 4) if (streamer and streamer.ttft is not None) else None
+                ),
                 "model_weight_gb": model_weight_gb,
                 "cumulative_wall_s": round(cumulative_wall_s, 2),
                 "sys_total_gb": mem_after["sys_total_gb"],
@@ -384,7 +389,7 @@ def run_context_target(target, model, tokenizer, TurboQuantCache, model_weight_g
             print(f"[turn {turn}] {error_type}: {e}", file=sys.stderr)
             metrics.write({
                 "run_target": target, "turn": turn,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
                 "prompt_label": prompt_label, "prompt_difficulty": prompt_difficulty,
                 "error": error_type,
             })
@@ -403,7 +408,7 @@ def run_context_target(target, model, tokenizer, TurboQuantCache, model_weight_g
             print(f"[turn {turn}] unexpected error: {e}", file=sys.stderr)
             metrics.write({
                 "run_target": target, "turn": turn,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
                 "prompt_label": prompt_label, "prompt_difficulty": prompt_difficulty,
                 "error": str(e),
             })

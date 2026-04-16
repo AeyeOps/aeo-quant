@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import statistics
 from collections import defaultdict
-from typing import Optional
 
 from .types import LevelStats, RampTransition, Sample, TurnRecord
 
@@ -38,7 +37,7 @@ def find_ramp_transitions(samples: list[Sample], ramp_window_s: float) -> list[R
     seen_levels: set[tuple[int, int]] = set()
     ordered = sorted(samples, key=lambda s: s.ts)
 
-    prev_running: Optional[int] = None
+    prev_running: int | None = None
     for i, s in enumerate(ordered):
         if s.running is None:
             continue

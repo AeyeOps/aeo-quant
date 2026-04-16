@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import re
 import subprocess
-from typing import Optional
 
 from .types import POOL_GIB_PATTERN, VLLM_LOG_PATTERN
 
@@ -37,7 +36,7 @@ def read_free_m() -> tuple[int, int, int]:
     return parse_free_m(out)
 
 
-def parse_size_to_mib(s: str) -> Optional[int]:
+def parse_size_to_mib(s: str) -> int | None:
     """Parse a human-readable size string (e.g. '3.5GiB') to integer MiB."""
     s = s.strip()
     m = re.match(r"^([\d.]+)\s*([KMGT]i?B)$", s)
@@ -59,7 +58,7 @@ def parse_size_to_mib(s: str) -> Optional[int]:
     return int(val * factors.get(unit, 1.0))
 
 
-def read_docker_stats_rss_mib(container_name: str) -> Optional[int]:
+def read_docker_stats_rss_mib(container_name: str) -> int | None:
     """Read the current memory usage of a Docker container in MiB."""
     try:
         out = subprocess.run(
@@ -84,7 +83,7 @@ def read_docker_stats_rss_mib(container_name: str) -> Optional[int]:
     return parse_size_to_mib(first)
 
 
-def read_latest_vllm_log_match(container_name: str) -> Optional[dict]:
+def read_latest_vllm_log_match(container_name: str) -> dict | None:
     """Scan recent Docker logs for the latest vLLM throughput/status line."""
     try:
         out = subprocess.run(
@@ -111,7 +110,7 @@ def read_latest_vllm_log_match(container_name: str) -> Optional[dict]:
     return None
 
 
-def read_pool_gib(container_name: str) -> Optional[float]:
+def read_pool_gib(container_name: str) -> float | None:
     """Scan Docker logs for the KV cache pool size in GiB."""
     try:
         out = subprocess.run(

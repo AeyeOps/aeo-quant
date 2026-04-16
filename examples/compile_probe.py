@@ -35,6 +35,7 @@ setup_cuda_allocator()
 
 FP8_CHECKPOINT = os.environ.get("FP8_CHECKPOINT")
 TOKENIZER_ID = os.environ.get("TOKENIZER_ID", "google/gemma-4-26B-A4B-it")
+KV_BITS = int(os.environ.get("KV_BITS", "4"))
 GEN_TOKENS = 100
 PARITY_TOKENS = 50
 BASELINE_PATH = Path("tests/fixtures/parity_baseline.txt")
@@ -102,7 +103,7 @@ def main() -> int:
 
     # --- Warmup (triggers compilation) ---
     print("[compile] warmup run (triggers JIT compilation)...")
-    cache_warmup = TurboQuantCache(bits=4)
+    cache_warmup = TurboQuantCache(bits=KV_BITS)
     t_warmup_start = time.time()
     with torch.inference_mode():
         _ = compiled_model.generate(
@@ -119,7 +120,7 @@ def main() -> int:
 
     # --- Parity check (50 greedy tokens) ---
     print(f"[compile] parity check: generating {PARITY_TOKENS} tokens")
-    cache_parity = TurboQuantCache(bits=4)
+    cache_parity = TurboQuantCache(bits=KV_BITS)
     torch.manual_seed(0)
     with torch.inference_mode():
         parity_out = compiled_model.generate(
@@ -172,7 +173,7 @@ def main() -> int:
     print(f"\n[compile] timed generation: {GEN_TOKENS} tokens")
 
     # Prefill measurement
-    cache_pf = TurboQuantCache(bits=4)
+    cache_pf = TurboQuantCache(bits=KV_BITS)
     with CudaTimer("prefill") as t_prefill, torch.inference_mode():
         compiled_model.generate(
             **inputs,
@@ -185,7 +186,7 @@ def main() -> int:
     torch.cuda.empty_cache()
 
     # Full generation
-    cache_full = TurboQuantCache(bits=4)
+    cache_full = TurboQuantCache(bits=KV_BITS)
     with CudaTimer("total") as t_total, torch.inference_mode():
         full_out = compiled_model.generate(
             **inputs,

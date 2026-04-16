@@ -11,6 +11,7 @@ except ImportError:
     pass  # numpy not installed
 
 # Core re-exports (stdlib only — always available)
-from aeo_quant.core.coherence import check_output_coherent
-from aeo_quant.core.context import trim_history_to_budget
-from aeo_quant.core.writers import CSVWriter, TranscriptWriter
+from aeo_quant.core.coherence import check_output_coherent as check_output_coherent
+from aeo_quant.core.context import trim_history_to_budget as trim_history_to_budget
+from aeo_quant.core.writers import CSVWriter as CSVWriter
+from aeo_quant.core.writers import TranscriptWriter as TranscriptWriter

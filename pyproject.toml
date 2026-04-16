@@ -1,6 +1,6 @@
 [project]
 name = "aeo-quant"
-version = "0.1.1"
+version = "0.1.2"
 description = "AeyeOps quantization toolkit — model evaluation, benchmarking, and quantization bridges"
 requires-python = ">=3.12"
 license = "Apache-2.0"
@@ -26,6 +26,13 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# Long prompt strings and CSS literals — breaking them hurts readability
+"src/aeo_quant/prompts/project_arc.py" = ["E501"]
+"src/aeo_quant/core/viewer.py" = ["E501"]
+"src/aeo_quant/core/types.py" = ["E501"]
+"src/aeo_quant/gpu/memory.py" = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

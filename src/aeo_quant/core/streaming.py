@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -46,7 +45,7 @@ def chat_completion_streaming(
     )
 
     t0 = time.monotonic()
-    ttft: Optional[float] = None
+    ttft: float | None = None
     content_parts: list[str] = []
     usage: dict = {}
 

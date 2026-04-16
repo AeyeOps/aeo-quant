@@ -8,9 +8,7 @@ from __future__ import annotations
 import re
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Optional
-
+from datetime import UTC, datetime
 
 # ---------------------------------------------------------------------------
 # Exit codes
@@ -86,7 +84,7 @@ MEMTRAIL_HEADER = [
 
 def iso(ts: float) -> str:
     """Format a Unix timestamp as an ISO 8601 string (UTC, millisecond precision)."""
-    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(timespec="milliseconds")
+    return datetime.fromtimestamp(ts, tz=UTC).isoformat(timespec="milliseconds")
 
 
 # ---------------------------------------------------------------------------
@@ -99,13 +97,13 @@ class Sample:
     used_mib: int
     available_mib: int
     swap_mib: int
-    container_rss_mib: Optional[int]
-    running: Optional[int]
-    waiting: Optional[int]
-    kv_pct: Optional[float]
-    prefix_hit_pct: Optional[float]
-    prompt_tps: Optional[float]
-    gen_tps: Optional[float]
+    container_rss_mib: int | None
+    running: int | None
+    waiting: int | None
+    kv_pct: float | None
+    prefix_hit_pct: float | None
+    prompt_tps: float | None
+    gen_tps: float | None
 
 
 @dataclass
@@ -120,9 +118,9 @@ class TurnRecord:
     total_tokens: int
     start_ts: float
     end_ts: float
-    mem_used_max_during: Optional[int]
-    kv_pct_max_during: Optional[float]
-    running_max_during: Optional[int]
+    mem_used_max_during: int | None
+    kv_pct_max_during: float | None
+    running_max_during: int | None
     ramp_event: str
 
 
@@ -132,7 +130,7 @@ class RampTransition:
     to_level: int
     ts: float
     peak_used_mib: int
-    max_kv_pct: Optional[float]
+    max_kv_pct: float | None
     sample_count: int
 
 
@@ -142,8 +140,8 @@ class LevelStats:
     sample_count: int
     max_used_mib: int
     mean_used_mib: float
-    max_kv_pct: Optional[float]
-    mean_kv_pct: Optional[float]
+    max_kv_pct: float | None
+    mean_kv_pct: float | None
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +178,7 @@ class Segment:
         return d
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Segment":
+    def from_dict(cls, d: dict) -> Segment:
         return cls(
             type=d["type"],
             content=d["content"],
@@ -252,7 +250,7 @@ class Monitor(threading.Thread):
         self.kill_kv_pct = kill_kv_pct
         self.stop_event = threading.Event()
         self.lock = threading.Lock()
-        self.last_sample: Optional[Sample] = None
+        self.last_sample: Sample | None = None
         self.samples: list[Sample] = []
         self.peak_used_mib: int = 0
         self.peak_swap_mib: int = swap_baseline_mib
@@ -260,7 +258,7 @@ class Monitor(threading.Thread):
         self.tick: int = 0
         self._last_heartbeat = 0.0
         self._last_docker_stats = 0.0
-        self._cached_rss: Optional[int] = None
+        self._cached_rss: int | None = None
 
     def run(self) -> None:
         # Import here to avoid circular dependency at module level
@@ -367,7 +365,7 @@ class Monitor(threading.Thread):
 
     def window_max(
         self, start_ts: float, end_ts: float
-    ) -> tuple[Optional[int], Optional[int], Optional[float], Optional[int], int]:
+    ) -> tuple[int | None, int | None, float | None, int | None, int]:
         """Return (max_used_mib, max_swap_mib, max_kv_pct, max_running, n) for [start, end]."""
         window = self.window_samples(start_ts, end_ts)
         if not window:

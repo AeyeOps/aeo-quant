@@ -62,9 +62,8 @@ def load_dotenv(path: str | Path = ".env", *, override: bool = True) -> int:
         value = value.strip()
 
         # Strip inline comments (only if not inside quotes)
-        if value and value[0] not in ('"', "'"):
-            if " #" in value:
-                value = value.split(" #", 1)[0].strip()
+        if value and value[0] not in ('"', "'") and " #" in value:
+            value = value.split(" #", 1)[0].strip()
 
         # Strip surrounding quotes
         if len(value) >= 2:

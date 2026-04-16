@@ -59,6 +59,7 @@ FP8_CHECKPOINT = Path(FP8_CHECKPOINT)
 
 TOKENIZER_ID = os.environ.get("TOKENIZER_ID", "google/gemma-4-26B-A4B-it")
 GEN_TOKENS = int(os.environ.get("GEN_TOKENS", "100"))
+KV_BITS = int(os.environ.get("KV_BITS", "4"))
 PROFILE_TRACE = os.environ.get("PROFILE_TRACE", "0") != "0"
 COMPARE_KV = os.environ.get("COMPARE_KV", "0") != "0"
 RESULTS_DIR = Path(f"results/profiling/{datetime.now().strftime('%Y%m%d-%H%M%S')}")
@@ -310,7 +311,7 @@ def main() -> None:
         sys.exit(1)
 
     # Warmup: a short generate() to trigger torch.compile JIT before timing.
-    _warmup_cache = TurboQuantCache(bits=4)
+    _warmup_cache = TurboQuantCache(bits=KV_BITS)
     _warmup_inputs = tokenizer("warmup", return_tensors="pt").to(model.device)
     with torch.inference_mode():
         model.generate(**_warmup_inputs, max_new_tokens=1, past_key_values=_warmup_cache,

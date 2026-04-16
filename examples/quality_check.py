@@ -16,14 +16,14 @@ import sys
 import time
 from pathlib import Path
 
-import aeo_quant  # noqa: F401 — triggers np.trapz compat shim before numpy is used
 import torch
 from transformers import AutoTokenizer
 
+import aeo_quant  # noqa: F401 — triggers np.trapz compat shim before numpy is used
 from aeo_quant.bridges.gemma4.loader import load_gemma4_fp8
 from aeo_quant.core.coherence import check_output_coherent
 from aeo_quant.core.config import load_dotenv, setup_cuda_allocator
-from aeo_quant.gpu.memory import _GB, enforce_cap, gb, mem_report
+from aeo_quant.gpu.memory import enforce_cap, mem_report
 
 load_dotenv()
 setup_cuda_allocator()
@@ -34,7 +34,7 @@ setup_cuda_allocator()
 VRAM_CAP_GB = float(os.environ.get("VRAM_CAP_GB", "90.0"))
 TOKENIZER_ID = os.environ.get("TOKENIZER_ID", "google/gemma-4-26B-A4B-it")
 MAX_NEW_TOKENS = 512
-TURBOQUANT_BITS = 4
+KV_BITS = int(os.environ.get("KV_BITS", "4"))
 
 FP8_CHECKPOINT = os.environ.get("FP8_CHECKPOINT")
 if not FP8_CHECKPOINT:
@@ -81,7 +81,7 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_ID)
     enforce_cap("after tokenizer", VRAM_CAP_GB)
 
-    print(f"[load] FP8 model...")
+    print("[load] FP8 model...")
     t0 = time.time()
     model = load_gemma4_fp8(str(FP8_CHECKPOINT))
     print(f"[load] done in {time.time() - t0:.1f}s")
@@ -98,7 +98,7 @@ def main() -> None:
         inputs = tokenizer(prompt_str, return_tensors="pt").to(model.device)
         n_input = int(inputs["input_ids"].shape[-1])
 
-        cache = TurboQuantCache(bits=TURBOQUANT_BITS)
+        cache = TurboQuantCache(bits=KV_BITS)
         t0 = time.time()
         with torch.inference_mode():
             outputs = model.generate(
@@ -129,7 +129,7 @@ def main() -> None:
             print(f"\n[FATAL] prompt {idx} ({label}) failed", file=sys.stderr)
             sys.exit(5 + idx)
 
-        print(f"  PASS")
+        print("  PASS")
         passed += 1
 
         del cache, outputs, inputs

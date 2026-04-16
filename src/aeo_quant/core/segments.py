@@ -15,7 +15,6 @@ Stdlib only.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Union
 
 from .types import Segment
 
@@ -30,7 +29,7 @@ class MarkerSpec:
     metadata: fixed metadata dict attached to every segment of this type.
     """
     start: str
-    end: Union[str, tuple[str, ...]]
+    end: str | tuple[str, ...]
     type: str
     metadata: dict = field(default_factory=dict)
 
@@ -54,7 +53,7 @@ class MarkerStreamParser:
         markers: list[MarkerSpec],
         *,
         default_type: str = "assistant",
-        strip_trailing: Optional[list[str]] = None,
+        strip_trailing: list[str] | None = None,
     ) -> None:
         self.markers = list(markers)
         self.default_type = default_type
@@ -66,7 +65,7 @@ class MarkerStreamParser:
         n = len(raw_text)
 
         while pos < n:
-            next_marker: Optional[MarkerSpec] = None
+            next_marker: MarkerSpec | None = None
             next_start_pos = n
             for m in self.markers:
                 idx = raw_text.find(m.start, pos)

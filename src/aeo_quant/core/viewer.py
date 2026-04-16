@@ -14,8 +14,6 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Optional
-
 
 _HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
@@ -453,7 +451,7 @@ def generate_html(
     jsonl_path: str | Path,
     output_path: str | Path | None = None,
     open_browser: bool = False,
-    vendor_dir: Optional[Path] = None,
+    vendor_dir: Path | None = None,
 ) -> Path:
     """Generate a self-contained HTML viewer from a transcript JSONL file.
 
@@ -474,7 +472,7 @@ def generate_html(
     out_path = Path(output_path) if output_path else jsonl_path.with_suffix(".html")
 
     # Parse JSONL
-    metadata: Optional[dict] = None
+    metadata: dict | None = None
     turns: list[dict] = []
     # utf-8-sig transparently strips a BOM if present (common on Windows)
     with open(jsonl_path, encoding="utf-8-sig") as f:

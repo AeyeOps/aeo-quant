@@ -27,6 +27,7 @@ setup_cuda_allocator()
 
 FP8_CHECKPOINT = os.environ.get("FP8_CHECKPOINT")
 TOKENIZER_ID = os.environ.get("TOKENIZER_ID", "google/gemma-4-26B-A4B-it")
+KV_BITS = int(os.environ.get("KV_BITS", "4"))
 
 
 def main() -> int:
@@ -56,7 +57,7 @@ def main() -> int:
 
     # --- Step 1: eager prefill + one decode token to warm up the cache ---
     print("[probe] running eager prefill + 2 decode tokens")
-    cache = TurboQuantCache(bits=4)
+    cache = TurboQuantCache(bits=KV_BITS)
     with torch.inference_mode():
         eager_out = model.generate(
             **inputs,

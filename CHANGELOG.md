@@ -2,6 +2,49 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.2] - 2026-04-16
+
+### Added
+
+- `examples/reasoning_check.py` — two hard reasoning prompts (Sylow
+  subgroup proof, concurrent LRU cache bug hunt) that stress attention
+  precision under different KV cache bit widths. Parameterized via
+  `KV_BITS` env var, default 4.
+
+### Changed
+
+- **`KV_BITS` env var standardized** across all example scripts
+  (`parity_check.py`, `profile_generate.py`, `compile_probe.py`,
+  `cuda_graph_probe.py`, `quality_check.py`, `multi_turn_16k.py`,
+  `multi_turn_32k.py`, `reasoning_check.py`). Replaces the old
+  hardcoded `TURBOQUANT_BITS = 4`. Default is 4; users can set
+  `KV_BITS=3` (or 2) to experiment with lower-precision KV cache.
+
+### Removed
+
+- `docs/archive/` — session continuation prompts from earlier Claude
+  Code sessions. Internal artifacts, not public-facing docs.
+- `examples/archive/` — old TRT-era validation scripts
+  (`bf16_reference.py`, `nvfp4_validate.py`, `turboquant_validate.py`).
+  Superseded by `quality_check.py` and `parity_check.py`.
+- `tests/fixtures/parity_baseline.txt` — parity baseline is
+  runtime-generated on first run, not a shipped fixture.
+
+### Documented
+
+- **TurboQuant 3-bit KV cache test results.** Tested against 4-bit
+  using two reasoning-intensive 500-token prompts. Both produce correct
+  reasoning at 3-bit (math proof valid, all 4 LRU bugs found) but
+  86–98% token divergence from cascade effect. No decode speedup.
+  Decision: 4-bit stays default — no memory pressure at 32K context
+  (3.15 GB KV cache fits easily). Revisit 3-bit at 128K+ where
+  the 3.15 GB savings becomes meaningful.
+- E5M2 (`float8_e5m2`) format rejection: hardware requires E4M3 for
+  RowWise `_scaled_mm` on Blackwell; E5M2 has half the mantissa
+  precision and its wider range is irrelevant under per-row scaling.
+
+---
+
 ## [0.1.1] - 2026-04-16
 
 Building blocks for non-MoE FP8 quantization, plus documentation

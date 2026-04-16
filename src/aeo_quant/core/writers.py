@@ -10,12 +10,11 @@ import json
 import threading
 import time
 from pathlib import Path
-from typing import Optional
 
 from .types import Segment, iso
 
 
-def _extract_assistant_text(segments: Optional[list[Segment]]) -> Optional[str]:
+def _extract_assistant_text(segments: list[Segment] | None) -> str | None:
     """Concatenate content from all assistant-typed segments.
 
     Used to populate the legacy top-level ``assistant`` field on turn records
@@ -81,7 +80,7 @@ class TranscriptWriter:
     CSV is the authoritative artifact; transcript is the conversation record.
     """
 
-    def __init__(self, path: Path, system_prompt: str, config: Optional[dict] = None):
+    def __init__(self, path: Path, system_prompt: str, config: dict | None = None):
         self.path = path
         self.lock = threading.Lock()
         self._fh = path.open("w")
@@ -114,10 +113,10 @@ class TranscriptWriter:
         ttft: float = 0.0,
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
-        segments: Optional[list[Segment]] = None,
-        raw_output: Optional[str] = None,
-        raw_usage: Optional[dict] = None,
-        extra: Optional[dict] = None,
+        segments: list[Segment] | None = None,
+        raw_output: str | None = None,
+        raw_usage: dict | None = None,
+        extra: dict | None = None,
     ) -> None:
         with self.lock:
             # Synthesize a single assistant segment if caller passed only assistant_msg.

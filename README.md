@@ -30,85 +30,100 @@ Pre-built checkpoint ready to download and run.
 # aeo-quant
 
 Quantization-aware inference and benchmarking toolkit for NVIDIA
-Blackwell (GB10).
+Blackwell. First bridge: **Gemma 4 26B-A4B in FP8**. The infrastructure
+is model-agnostic.
 
-`aeo-quant` provides three things: **quantization bridges** that wire
-low-precision weights into Hugging Face `transformers` without forking
-upstream code, **a runtime benchmarking stack** for multi-turn inference
-evaluation, and **model-agnostic infrastructure** for monitoring,
-output analysis, and quality gating.
+## SDK at a glance
 
-The first bridge ships FP8 support for **Gemma 4 26B-A4B**. The
-infrastructure underneath is designed for any model.
+```
+aeo-quant
+├── bridges/              Quantization bridges — plug into HF transformers
+│   └── gemma4/             FP8 experts, class-swap loader, checkpoint builder
+│
+├── core/                 Model-agnostic infrastructure (stdlib only)
+│   ├── streaming           OpenAI-compatible HTTP streaming client
+│   ├── segments            Typed output parser (thinking, tool_call, assistant)
+│   ├── coherence           Output quality validation
+│   ├── context             Conversation history budget trimming
+│   ├── writers             Thread-safe JSONL + CSV + HTML transcript
+│   ├── analysis            Load-test analytics (percentiles, ramp detection)
+│   └── types               Runtime monitor w/ kill switch, data types
+│
+├── gpu/                  CUDA utilities (torch + psutil)
+│   ├── memory              CudaTimer, mem_report, enforce_cap
+│   └── quant               FP8 quantization (3D fused, 2D standard)
+│
+├── plots/                Context-scaling dashboards (matplotlib)
+├── prompts/              Progressive multi-turn evaluation prompts
+│
+└── examples/             Ready-to-run scripts
+    ├── profile_generate    Timing + profiler + NVTX/nsys auto-wrap
+    ├── parity_check        Greedy regression canary vs pinned baseline
+    ├── quality_check       Three-prompt coherence smoke test
+    ├── build_checkpoint    Shard-streaming FP8 checkpoint builder
+    └── multi_turn_*        16K / 32K conversation benchmarks
+```
+
+**Layers import only what they need:** `core` is stdlib-only, `gpu` adds
+torch, `bridges` adds transformers, `plots` adds matplotlib.
+`import aeo_quant` is always safe.
+
+```mermaid
+graph LR
+    subgraph "aeo-quant"
+        B[bridges/gemma4] -->|class swap| HF[HuggingFace transformers]
+        B -->|torch._scaled_mm| GPU[CUDA / Blackwell]
+        B -->|TurboQuant 4-bit| KV[KV Cache]
+        C[core] -->|streaming| API[OpenAI-compat APIs]
+        C -->|segments + writers| OUT[Transcripts & Metrics]
+        C -->|coherence + parity| GATE[Quality Gates]
+        G[gpu/quant] -->|FP8 quantize| B
+        P[plots] -->|dashboards| OUT
+    end
+    CK[Checkpoint\naeyeops/gemma-4-26b-a4b-it-fp8] --> B
+```
 
 ## What it does
 
 ### Quantization bridges
 
-- **Gemma 4 FP8 bridge.** A `Gemma4TextExpertsFP8` class-swap loader
-  that plugs into `AutoModelForCausalLM.from_pretrained`, loads FP8
-  expert weights with per-output-channel scales, and runs the MoE
-  forward pass through `torch._scaled_mm` with per-row dynamic input
-  quantization. Pre-built checkpoint:
+- **Gemma 4 FP8 bridge.** `Gemma4TextExpertsFP8` class-swap loader —
+  plugs into `from_pretrained`, loads FP8 expert weights with
+  per-output-channel scales, runs MoE forward through `torch._scaled_mm`
+  with per-row dynamic input quantization. Pre-built checkpoint:
   [`aeyeops/gemma-4-26b-a4b-it-fp8`](https://huggingface.co/aeyeops/gemma-4-26b-a4b-it-fp8).
 - **Checkpoint builder.** Shard-streaming FP8 quantization from bf16
-  safetensors — peaks ~18 GB RSS on a 26B model, never materializes
-  full weights, never touches the GPU.
+  safetensors — peaks ~18 GB RSS, never materializes full weights.
 
 ### Inference benchmarking
 
-- **Profile generator.** CUDA-event timing for tokenize / prefill /
-  decode, optional `torch.profiler` kernel trace, and NVTX markers
-  that auto-wrap under `nsys` when `AEO_MOE_TRACE=1` is set.
-- **Multi-turn benchmarks.** Full conversation runs at 16K and 32K
-  context with per-turn metrics, memory tracking, and dashboard
-  generation. Produces JSONL transcripts, CSV metrics, HTML viewer,
-  and a 4-panel PNG dashboard (tok/s, memory, thinking ratio, time
-  vs context fill).
-- **Parity check.** 50-token greedy regression canary against a
-  pinned baseline — catches silent output changes from code or
-  weight modifications.
-- **Quality check.** Three-prompt smoke test for coherence (garbage
-  detection, repetition loops, printable ASCII ratio).
+- **Profile generator.** CUDA-event timing, `torch.profiler` kernel
+  trace, NVTX markers with nsys auto-wrap (`AEO_MOE_TRACE=1`).
+- **Multi-turn benchmarks.** 16K / 32K context runs with JSONL
+  transcripts, CSV metrics, HTML viewer, and 4-panel PNG dashboards.
+- **Parity check.** 50-token greedy regression canary vs pinned baseline.
+- **Quality check.** Three-prompt coherence smoke test.
 
 ### Model-agnostic infrastructure
 
-- **Runtime monitor.** Thread-safe `Monitor` that samples memory,
-  GPU KV-cache utilization, and throughput every 0.5 s. Trips a
-  kill switch on configurable threshold breaches.
-- **Memory management.** `CudaTimer` context manager, `mem_report()`
-  with system/process/torch stats, `enforce_cap()` with auto-kill on
-  VRAM overflow.
-- **Streaming client.** HTTP streaming for OpenAI-compatible APIs —
-  returns content, usage, and time-to-first-token. Includes health
-  polling and model discovery.
-- **Output parsing.** `MarkerStreamParser` converts raw streamed text
-  into typed segments (thinking, assistant, tool_call, tool_result,
-  system) — every byte accounted for, no silent drops.
-- **Transcript writer.** Thread-safe JSONL + CSV writer with an
-  embedded HTML conversation viewer (CSS, JS, markdown rendering
-  baked into a single file).
-- **Context budget manager.** `trim_history_to_budget()` drops oldest
-  conversation pairs while preserving the system prompt and recent
-  exchanges within a token budget.
-- **Coherence checker.** `check_output_coherent()` validates generated
-  output against configurable thresholds for unique tokens, repetition
-  run length, and printable character ratio.
-- **Load-test analytics.** Percentile calculations, ramp-transition
-  detection, and per-level statistics for characterizing throughput
-  under load.
-- **Context scaling dashboards.** Matplotlib-based 4-panel PNG
-  generation: tok/s, memory, thinking ratio, and time per turn vs
-  context fill percentage.
-- **Prompt library.** Progressive multi-turn coding specifications
-  and domain-agnostic follow-up patterns for evaluation harnesses.
-
-## Who it's for
-
-Anyone running quantized models on Blackwell hardware who wants
-structured tooling around inference benchmarking and quality gating.
-If you are specifically trying to run Gemma 4 26B-A4B in FP8 on a
-GB10 today, the bridge is the fastest path.
+- **Runtime monitor.** Thread-safe sampling of memory, KV%, throughput
+  with kill switch on threshold breach.
+- **Memory management.** `CudaTimer`, `mem_report()`, `enforce_cap()`.
+- **Streaming client.** OpenAI-compatible HTTP streaming with TTFT,
+  usage, health polling, model discovery.
+- **Output parsing.** `MarkerStreamParser` — typed segments (thinking,
+  tool_call, assistant), every byte accounted for.
+- **Transcript writer.** Thread-safe JSONL + CSV with embedded HTML
+  viewer.
+- **Context budget.** `trim_history_to_budget()` — preserves system
+  prompt, drops oldest pairs.
+- **Coherence checker.** Repetition, garbage, printable ASCII
+  validation.
+- **Load-test analytics.** Percentiles, ramp detection, per-level stats.
+- **Dashboards.** 4-panel PNG: tok/s, memory, thinking ratio, time vs
+  context fill.
+- **Prompt library.** Progressive multi-turn coding specs and follow-up
+  patterns.
 
 ## Hardware support
 
@@ -250,35 +265,6 @@ PNG.
 
 See [`examples/README.md`](examples/README.md) for the full walkthrough
 of every script.
-
-## Project layout
-
-```
-src/aeo_quant/
-├── core/           # stdlib only — no torch, no transformers
-│   ├── config      # .env loading, CUDA allocator setup
-│   ├── coherence   # output quality validation (repetition, garbage)
-│   ├── segments    # typed stream parser (thinking, tool_call, ...)
-│   ├── streaming   # HTTP streaming for OpenAI-compatible APIs
-│   ├── types       # Monitor thread, data types, exit codes
-│   ├── context     # conversation history budget trimming
-│   ├── analysis    # load-test analytics (percentiles, ramp detection)
-│   ├── writers     # thread-safe JSONL, CSV, transcript writers
-│   └── viewer      # self-contained HTML conversation viewer
-├── gpu/            # torch + psutil
-│   ├── memory      # CudaTimer, mem_report, enforce_cap
-│   └── quant       # quantize_3d_to_fp8, dequantize_3d_from_fp8
-├── bridges/        # transformers integration
-│   └── gemma4/     # FP8 expert modeling, class-swap loader,
-│                   # thinking-channel streamer and template
-├── plots/          # matplotlib context-scaling dashboards
-└── prompts/        # progressive multi-turn evaluation prompts
-```
-
-The layers are ordered by dependency weight: `core` imports nothing
-outside the standard library, `gpu` adds `torch`, `bridges` adds
-`transformers`, `plots` adds `matplotlib`. `import aeo_quant` only
-pulls in `core`.
 
 ## Documentation
 

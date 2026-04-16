@@ -7,11 +7,13 @@ These scripts show how to use `aeo-quant` with a Gemma 4 FP8 checkpoint on NVIDI
 Drop a `.env` file in this directory (or the directory you run from):
 
 ```
-FP8_CHECKPOINT=/path/to/your/fp8/checkpoint
+FP8_CHECKPOINT=aeyeops/gemma-4-26b-a4b-it-fp8
 HF_TOKEN=hf_your_token_here
 ```
 
-That's it. The scripts read `.env` automatically. No command-line flags, no `source`, no `export` needed.
+`FP8_CHECKPOINT` accepts a HuggingFace model ID (downloaded automatically) or a local path. The pre-built checkpoint is at [`aeyeops/gemma-4-26b-a4b-it-fp8`](https://huggingface.co/aeyeops/gemma-4-26b-a4b-it-fp8).
+
+The scripts read `.env` automatically. No command-line flags, no `source`, no `export` needed.
 
 ## The examples
 
@@ -22,6 +24,16 @@ uv run python examples/quality_check.py
 ```
 
 Loads the model, sends three different prompts (a coding task, a plain-English explanation, and a mixed code+prose question), prints each response so you can read it, and checks for output quality issues like repetition loops or garbage tokens. Takes about 5 minutes. Run this first after building or downloading a checkpoint.
+
+### `parity_check.py` — "Did my code change break the output?"
+
+```bash
+uv run python examples/parity_check.py
+```
+
+Generates 50 greedy tokens from a fixed prompt with a fixed seed, saves the token IDs, and diffs against a pinned baseline (`tests/fixtures/parity_baseline.txt`). If no baseline exists, the first run creates one. Fails on >5% token divergence.
+
+This is the regression canary — run it after any change to the model loading, forward pass, or quantization code. It catches silent quality regressions that timing-only benchmarks miss.
 
 ### `multi_turn_16k.py` — "How does it hold up in a real conversation?"
 
@@ -66,17 +78,13 @@ Produces two things:
 Run it after a benchmark, not during (it needs the GPU). Useful knobs:
 
 ```bash
-# Compare TurboQuant KV cache vs native cache overhead
-COMPARE_KV=1 uv run python examples/profile_generate.py
-
-# Just timing breakdown, skip the profiler trace
-PROFILE_TRACE=0 uv run python examples/profile_generate.py
-
-# Generate more tokens for a more stable measurement
-GEN_TOKENS=200 uv run python examples/profile_generate.py
+COMPARE_KV=1     uv run python examples/profile_generate.py   # TurboQuant vs native cache
+PROFILE_TRACE=1  uv run python examples/profile_generate.py   # include kernel-level trace
+GEN_TOKENS=200   uv run python examples/profile_generate.py   # longer measurement
+AEO_MOE_TRACE=1  uv run python examples/profile_generate.py   # auto-wrap under nsys with NVTX markers
 ```
 
-Results go to `results/profiling/`.
+Results go to `results/profiling/<timestamp>/` (timing + stdout log). When `AEO_MOE_TRACE=1` is set, the script auto-wraps itself under `nsys profile` — the NVTX trace lands in `results/nsys/<timestamp>/`.
 
 ### `build_checkpoint.py` — "I want to build my own FP8 checkpoint"
 
@@ -92,8 +100,7 @@ You only need to run this if you're building from scratch rather than using a pu
 
 - An NVIDIA GPU with enough memory (tested on GB10 with 128 GB unified)
 - Python 3.12+
-- The `aeo-quant` package installed with GPU extras: `pip install aeo-quant[bridges]`
-- `turboquant` for KV cache compression: `pip install turboquant`
+- The `aeo-quant` package installed with the bridge stack: `uv pip install -e '.[bridges]'` (includes `turboquant` for KV cache compression)
 
 ## Adapting these for other models
 

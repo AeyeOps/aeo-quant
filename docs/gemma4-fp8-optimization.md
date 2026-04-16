@@ -113,11 +113,71 @@ This is why routing-batching experiments don't move the wall clock: the Python e
 
 ---
 
-## Next steps (ranked)
+## Optimization results (post-`_scaled_mm`)
 
-See [`plans/2026-04-15-fp8-moe-decode-optimization.md`](./plans/2026-04-15-fp8-moe-decode-optimization.md) for execution detail and verification gates.
+All numbers: 100-token greedy decode, TurboQuant-4bit KV, 61-token prompt.
 
-1. **NVTX trace markers** — zero-cost per-stage labels for future profiling.
-2. **Hot-path hygiene** — eliminate per-call scale allocation + dtype conversion. +35 MB for lossless fp32 scales at load. Expected +2–5%.
-3. **`torch.compile(mode="reduce-overhead")`** — aims at the 2.4× CPU/CUDA gap. First-run warmup cost, expected +5–20% if compatible with `_scaled_mm` under `dynamo`.
-4. **Non-MoE FP8 quantization** — biggest lever; 53% of CUDA is still bf16. Requires upgraded accuracy gate (teacher-forced top-1 agreement, not just greedy parity) because of cumulative quantization error risk. LM head is the highest-risk layer and may need to stay bf16.
+### Shipped: NVTX trace markers (Step 1)
+
+Four opt-in named ranges (`fp8_moe_route`, `fp8_moe_gate_up`, `fp8_moe_down`, `fp8_moe_combine`). Gated by `AEO_MOE_TRACE=1` — zero cost when off. When set, `profile_generate.py` auto-wraps under `nsys profile` via `os.execvp`, so the switch is all-or-nothing: markers + collector together. Trace lands in `results/nsys/<timestamp>/`.
+
+NVTX summary from a 100-token run:
+- `fp8_moe_gate_up` 41.3% of MoE time (27,732 calls, 120 us avg)
+- `fp8_moe_down` 38.7% (27,732 calls, 112 us avg)
+- `fp8_moe_route` 8.0% (3,030 calls, 211 us avg)
+- `fp8_moe_combine` 7.2% (27,732 calls, 21 us avg)
+
+Gate-up and down (the two `_fp8_linear` calls) together are 80% of MoE time — the targets for the hygiene step.
+
+Decode tok/s: unchanged from baseline (8.92 with markers off).
+
+### Shipped: hot-path hygiene (Step 2)
+
+Pre-convert scale buffers from `(E, out, 1) bf16` to `(E, 1, out) fp32` at load time. Eliminates per-call `squeeze(-1).unsqueeze(0).float().contiguous()` across 55k expert invocations per 100 tokens. bf16 to fp32 is mathematically lossless. Cost: +30 MB.
+
+| Metric | Pre-hygiene | Post-hygiene | Delta |
+|---|---|---|---|
+| Decode tok/s | 8.92 | 8.96 | +0.4% (noise) |
+| Prefill ms | 521 | 487 | -6.5% |
+| torch_alloc | 26.83 GB | 26.86 GB | +30 MB |
+
+Parity: 50/50 byte-for-byte match.
+
+### Shipped: `torch.compile(mode="reduce-overhead")` (Step 3b)
+
+CUDA graph capture of the full model forward fails (`cudaErrorStreamCaptureInvalidated`) because the MoE routing loop has data-dependent control flow. `torch.compile` handles this by falling back to eager at graph breaks and compiling the rest.
+
+| Metric | Pre-compile | Post-compile | Delta |
+|---|---|---|---|
+| Decode tok/s | 8.96 | **10.08** | **+12.5%** |
+| Prefill ms | 487 | 482 | -1% |
+| Warmup | — | 1.3 s | one-time per process |
+| Peak VRAM | 26.86 GB | 26.95 GB | +90 MB |
+
+Parity: 50/50 byte-for-byte match. `torch.compile` preserves semantics exactly.
+
+### Rejected: non-MoE FP8 quantization (Step 4)
+
+Implemented `LinearFP8` (drop-in `nn.Linear` replacement using `torch._scaled_mm`) and `quantize_2d_to_fp8`. Post-load swap of 206 non-MoE Linear modules (attention q/k/v/o, non-MoE MLP gate/up/down, LM head).
+
+Results:
+- Decode tok/s: 10.10 (no improvement over 10.08 — `torch.compile` already optimized these matmuls)
+- VRAM: -840 MB (26.02 vs 26.86 GB — real savings from halving 206 Linear modules)
+- **Parity: 26/50 prefix match, 46% token mismatch** — coherent output but significant divergence
+
+The lack of decode improvement combined with quality divergence made this a net negative. `torch.compile` already addressed the kernel launch overhead that was the non-MoE bottleneck. FP8 quantization on top of that only adds quantization noise through all 24 layers of attention + MLP + LM head, with the error cascading through greedy decode.
+
+The building blocks (`LinearFP8`, `quantize_2d_to_fp8`) are retained in the codebase for future use — they're correct and tested but not wired into the default path.
+
+---
+
+## Final performance summary
+
+| Optimization | Decode tok/s | Cumulative vs baseline |
+|---|---|---|
+| Baseline (bf16 dequant) | 7.82 | — |
+| `torch._scaled_mm` FP8-native matmul | 8.94 | +14% |
+| Hot-path hygiene (fp32 scales) | 8.96 | +15% |
+| `torch.compile(mode="reduce-overhead")` | **10.08** | **+29%** |
+
+Peak VRAM: 26.95 GB. Parity: byte-for-byte match with FP8 baseline across all shipped steps.

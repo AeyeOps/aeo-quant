@@ -27,3 +27,6 @@ results/
 
 # Local tooling (session state, agent scratch, etc.)
 .claude/
+
+# Parity baselines (generated locally)
+tests/fixtures/

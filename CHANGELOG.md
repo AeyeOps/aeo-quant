@@ -2,6 +2,44 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.1] - 2026-04-16
+
+Building blocks for non-MoE FP8 quantization, plus documentation
+improvements based on the initial public release.
+
+### Added
+
+- `quantize_2d_to_fp8` in `gpu/quant.py` — per-output-row FP8
+  quantization for standard 2D weight matrices (`nn.Linear`). Companion
+  to the existing `quantize_3d_to_fp8` for fused MoE experts.
+- `LinearFP8` in `bridges/gemma4/linear_fp8.py` — drop-in `nn.Linear`
+  replacement that stores FP8 weights with fp32 per-output-channel
+  scales. Shared `fp8_linear()` function usable by both `LinearFP8` and
+  the MoE expert path. `from_linear()` classmethod for in-place
+  conversion.
+
+### Changed
+
+- **README restructured** — SDK-at-a-glance tree and Mermaid
+  architecture diagram up front; full "What it does" details below.
+  Hero section highlights the published FP8 checkpoint
+  ([aeyeops/gemma-4-26b-a4b-it-fp8](https://huggingface.co/aeyeops/gemma-4-26b-a4b-it-fp8))
+  with TurboQuant KV cache.
+- **examples/README.md** — added `parity_check.py` documentation,
+  `AEO_MOE_TRACE=1` nsys auto-wrap, pointed `.env` at the published
+  HF checkpoint.
+- **License** — switched from MIT to Apache 2.0 to align with the ML
+  tooling ecosystem (transformers, accelerate, vLLM, turboquant).
+
+### Documented
+
+- Non-MoE FP8 quantization investigation results in
+  `docs/gemma4-fp8-optimization.md`: 206 Linear modules converted,
+  -840 MB VRAM, but 0% decode speedup and 46% parity divergence.
+  Rejected — MoE-only FP8 remains the shipped configuration.
+
+---
+
 ## [0.1.0] - 2026-04-15
 
 Initial public release. Establishes the package structure, the bridge

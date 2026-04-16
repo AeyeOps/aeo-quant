@@ -19,7 +19,7 @@ Produces per target:
 Usage:
     uv run python examples/multi_turn_16k.py
 
-Set FP8_CHECKPOINT in .env or as an env var to point at your checkpoint.
+Set FP8_CHECKPOINT (or NVFP4_CHECKPOINT + QUANT_FORMAT=nvfp4) in .env or env var.
 """
 from __future__ import annotations
 
@@ -36,14 +36,14 @@ import torch
 from transformers import AutoTokenizer
 
 import aeo_quant  # noqa: F401 — triggers np.trapz compat shim before numpy is used
-from aeo_quant.bridges.gemma4.loader import load_gemma4_fp8
+from aeo_quant.bridges.gemma4.loader import load_gemma4
 from aeo_quant.bridges.gemma4.parser import GEMMA4_PARSER
 from aeo_quant.bridges.gemma4.streamer import LiveStreamer
 from aeo_quant.bridges.gemma4.template import incremental_turn_tokens
 from aeo_quant.core.coherence import check_output_coherent
 
 # .env is the final authority — overrides anything already in the shell
-from aeo_quant.core.config import load_dotenv, results_dir, setup_cuda_allocator
+from aeo_quant.core.config import load_dotenv, quant_env, results_dir, setup_cuda_allocator
 from aeo_quant.core.viewer import generate_html
 from aeo_quant.core.writers import CSVWriter, JSONLWriter, TranscriptWriter
 from aeo_quant.gpu.memory import (
@@ -63,10 +63,10 @@ setup_cuda_allocator()
 # ---------------------------------------------------------------------------
 # Configuration — sensible defaults, overridable via env vars
 # ---------------------------------------------------------------------------
+QUANT_FORMAT, CHECKPOINT, KV_BITS = quant_env()
 VRAM_CAP_GB = float(os.environ.get("VRAM_CAP_GB", "90.0"))
 TOKENIZER_ID = os.environ.get("TOKENIZER_ID", "google/gemma-4-26B-A4B-it")
 MAX_NEW_TOKENS = 10000
-KV_BITS = int(os.environ.get("KV_BITS", "4"))
 TEMPLATE_OVERHEAD_PER_TURN = 20
 MIN_USEFUL_GENERATION = 512
 MEMORY_CHECK_EVERY_N_TOKENS = 100
@@ -78,16 +78,6 @@ VERBOSE_THINK = os.environ.get("VERBOSE_THINK", "0") != "0"
 
 RESULTS_DIR = results_dir("context_scaling")
 
-FP8_CHECKPOINT = os.environ.get("FP8_CHECKPOINT")
-if not FP8_CHECKPOINT:
-    print(
-        "[FATAL] FP8_CHECKPOINT not set. Either:\n"
-        "  1. Add FP8_CHECKPOINT=/path/to/checkpoint to .env in this directory\n"
-        "  2. Export FP8_CHECKPOINT=/path/to/checkpoint before running",
-        file=sys.stderr,
-    )
-    sys.exit(1)
-FP8_CHECKPOINT = Path(FP8_CHECKPOINT)
 
 # Per-turn memory CSV header
 MEMTRAIL_HEADER = [
@@ -102,8 +92,8 @@ def preflight() -> None:
     if not torch.cuda.is_available():
         print("[FATAL] CUDA not available — GPU-only.", file=sys.stderr)
         sys.exit(1)
-    if not FP8_CHECKPOINT.exists():
-        print(f"[FATAL] FP8 checkpoint missing at {FP8_CHECKPOINT}.", file=sys.stderr)
+    if not CHECKPOINT.exists():
+        print(f"[FATAL] checkpoint missing at {CHECKPOINT}.", file=sys.stderr)
         sys.exit(1)
 
     dev_name = torch.cuda.get_device_name(0)
@@ -114,7 +104,7 @@ def preflight() -> None:
     print(f"[preflight] device: {dev_name} (sm_{cc_major}{cc_minor})")
     print(f"[preflight] torch: {torch.__version__}")
     print(f"[preflight] unified mem available: {gb(vm.available)}")
-    print(f"[preflight] fp8 checkpoint: {FP8_CHECKPOINT}")
+    print(f"[preflight] {QUANT_FORMAT} checkpoint: {CHECKPOINT}")
     print(f"[preflight] targets: {CONTEXT_TARGETS}")
     print(f"[preflight] safety cap: {VRAM_CAP_GB:.0f} GB")
 
@@ -460,9 +450,9 @@ def main() -> None:
             tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_ID)
             enforce_cap("after tokenizer", VRAM_CAP_GB)
 
-            print(f"[load] FP8 model: {FP8_CHECKPOINT}")
+            print(f"[load] {QUANT_FORMAT.upper()} model: {CHECKPOINT}")
             t0 = time.time()
-            model = load_gemma4_fp8(str(FP8_CHECKPOINT))
+            model = load_gemma4(str(CHECKPOINT), quant_format=QUANT_FORMAT)
             print(f"[load] model loaded in {time.time() - t0:.1f}s")
             post_load = mem_report("model loaded")
             model_weight_gb = post_load["torch_alloc_gb"]

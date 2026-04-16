@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """CUDA graph capture probe for _scaled_mm on Blackwell.
 
+FP8-only — does not support QUANT_FORMAT env var. Both FP8 and NVFP4
+use the same _scaled_mm path after load, so this probe validates both.
+
 Answers one question: can we capture a single decode step (which runs
 through Gemma4TextExpertsFP8._fp8_linear → torch._scaled_mm) inside a
 CUDA graph and replay it with matching output?

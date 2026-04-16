@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """torch.compile(mode="reduce-overhead") probe.
 
+FP8-only — does not support QUANT_FORMAT env var. Use the main example
+scripts (profile_generate.py, parity_check.py) for multi-format testing.
+
 Loads the FP8 model, wraps it with torch.compile, runs:
   1. Warmup (measures compile overhead)
   2. Parity check against pinned baseline

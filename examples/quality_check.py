@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Quick quality check — three diverse prompts, coherence verified.
 
+FP8-only — does not support QUANT_FORMAT env var. Use parity_check.py
+or reasoning_check.py for multi-format quality testing.
+
 Loads the FP8 checkpoint once, fires three prompts (code, natural language,
 mixed), prints each response, and fails fast if output quality degrades.
 Takes about 5 minutes. Use this to verify a checkpoint before longer tests.

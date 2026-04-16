@@ -9,7 +9,7 @@ Produces:
 Usage:
     uv run python examples/profile_generate.py
 
-Set FP8_CHECKPOINT in .env or env var.
+Set FP8_CHECKPOINT (or NVFP4_CHECKPOINT + QUANT_FORMAT=nvfp4) in .env or env var.
 """
 from __future__ import annotations
 
@@ -39,8 +39,7 @@ import torch
 from transformers import AutoTokenizer
 
 import aeo_quant  # noqa: F401 — triggers np.trapz compat shim before numpy is used
-from aeo_quant.bridges.gemma4.loader import load_gemma4_fp8
-from aeo_quant.core.config import load_dotenv, results_dir, setup_cuda_allocator
+from aeo_quant.core.config import load_dotenv, quant_env, results_dir, setup_cuda_allocator
 from aeo_quant.core.writers import Tee
 from aeo_quant.gpu.memory import CudaTimer, mem_report
 
@@ -50,15 +49,9 @@ setup_cuda_allocator()
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-FP8_CHECKPOINT = os.environ.get("FP8_CHECKPOINT")
-if not FP8_CHECKPOINT:
-    print("[FATAL] FP8_CHECKPOINT not set.", file=sys.stderr)
-    sys.exit(1)
-FP8_CHECKPOINT = Path(FP8_CHECKPOINT)
-
+QUANT_FORMAT, CHECKPOINT, KV_BITS = quant_env()
 TOKENIZER_ID = os.environ.get("TOKENIZER_ID", "google/gemma-4-26B-A4B-it")
 GEN_TOKENS = int(os.environ.get("GEN_TOKENS", "100"))
-KV_BITS = int(os.environ.get("KV_BITS", "4"))
 PROFILE_TRACE = os.environ.get("PROFILE_TRACE", "0") != "0"
 COMPARE_KV = os.environ.get("COMPARE_KV", "0") != "0"
 RESULTS_DIR = results_dir("profiling")
@@ -278,9 +271,10 @@ def main() -> None:
     print(f"\n[load] tokenizer: {TOKENIZER_ID}")
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_ID)
 
-    print(f"[load] FP8 model: {FP8_CHECKPOINT}")
+    print(f"[load] {QUANT_FORMAT.upper()} model: {CHECKPOINT}")
     t0 = time.time()
-    model = load_gemma4_fp8(str(FP8_CHECKPOINT))
+    from aeo_quant.bridges.gemma4.loader import load_gemma4
+    model = load_gemma4(str(CHECKPOINT), quant_format=QUANT_FORMAT)
     print(f"[load] model loaded in {time.time() - t0:.1f}s")
     post_load = mem_report("model loaded")
     model_weight_gb = post_load["torch_alloc_gb"]

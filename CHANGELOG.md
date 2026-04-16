@@ -2,6 +2,65 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.5] - 2026-04-16
+
+### Removed
+
+- **`.fp8_cache/` sidecar and all cache save/load code in `load_gemma4_nvfp4()`.**
+  The cache was designed to skip a 30–60s NVFP4→FP8 conversion on subsequent
+  loads, but the batched-16-experts conversion optimization added in v0.1.4
+  reduced conversion cost to ~10s. Measured cache load (~124s of disk I/O
+  for 21 GB of shards) was consistently ~114s *slower* than just reconverting.
+  Removing the cache simplifies the loader, eliminates stale-cache risk, and
+  makes load times predictable. Full write-up in `docs/gemma4-fp8-optimization.md`
+  Step 6. **If you have a `.fp8_cache/` directory inside your NVFP4 checkpoint
+  dir from v0.1.4, delete it — it is no longer used.**
+
+### Changed
+
+- `load_gemma4_nvfp4()` now always runs the NVFP4→FP8 conversion. Total NVFP4
+  load time: ~107s (97s `from_pretrained` + 10s conversion + compile wrap),
+  same as before on first load, ~115s faster than the (broken) cached path.
+- Docstring and module docstring in `bridges/gemma4/loader.py` updated to
+  document why the cache was removed.
+
+### Added
+
+- Diagnostic logging in `_convert_nvfp4_experts_to_fp8()` and
+  `load_gemma4_nvfp4()` — per-layer timing, `mem_report()` at key checkpoints,
+  helps catch future memory regressions.
+- `parity_check.py` now prints stage-by-stage timing and memory reports.
+- KB note `kb/nvfp4-blackwell-research.md`: "Conversion Cache Removed" section.
+
+## [0.1.4] - 2026-04-16
+
+### Added
+
+- **NVFP4 quantization pipeline** — full support for NVIDIA's microscaling
+  FP4 (E2M1 with two-level FP8 block scales, block_size=16). Stores
+  checkpoint at ~23 GB (vs 28.8 GB FP8, -19%); dequants to FP8 at load
+  time for the proven `_scaled_mm` inference path.
+  - `quantize_3d_to_nvfp4` / `dequant_3d_from_nvfp4` in `gpu/quant.py`
+  - `quantize_2d_to_nvfp4` / `dequant_2d_from_nvfp4` (2D variants)
+  - `Gemma4TextExpertsNVFP4` in `bridges/gemma4/modeling_nvfp4.py`
+  - `load_gemma4_nvfp4()` in `bridges/gemma4/loader.py` — loads NVFP4
+    checkpoint, converts to FP8, caches conversion in `.fp8_cache/`
+  - `load_gemma4()` dispatcher — routes by `quant_format` parameter
+  - `examples/build_checkpoint_nvfp4.py` — shard-streaming builder
+- `quant_env()` in `core/config.py` — centralized env var reading for
+  `QUANT_FORMAT`, `CHECKPOINT` / `FP8_CHECKPOINT` / `NVFP4_CHECKPOINT`,
+  and `KV_BITS` (defaults: fp8/4-bit; nvfp4/3-bit).
+
+### Changed
+
+- **Example scripts unified** — `profile_generate.py`, `parity_check.py`,
+  `reasoning_check.py`, `multi_turn_16k.py`, `multi_turn_32k.py` all use
+  `quant_env()` + `load_gemma4()`. Set `QUANT_FORMAT=nvfp4` to switch.
+  FP8 remains the default; no existing behavior changes.
+- `.env` — added `NVFP4_CHECKPOINT` entry.
+
+---
+
 ## [0.1.3] - 2026-04-16
 
 ### Added

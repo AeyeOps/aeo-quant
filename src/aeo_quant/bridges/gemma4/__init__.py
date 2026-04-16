@@ -1,4 +1,4 @@
-"""Gemma 4 FP8 bridge — class-swap loader for fused 3D MoE expert quantization."""
+"""Gemma 4 FP8/NVFP4 bridge — class-swap loader for fused 3D MoE expert quantization."""
 
 from aeo_quant._lazy import require as _require
 

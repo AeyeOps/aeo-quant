@@ -232,3 +232,75 @@ Gemma 4 26B-A4B: 24 layers, 32 KV heads, 128 head dim. Per-token KV in bf16 = 39
 All example scripts accept `KV_BITS` as an env var so users can experiment with 3-bit (or 2-bit) at their discretion. Revisit 3-bit when pushing to 128K+ context where the 3.15 GB savings becomes meaningful.
 
 The reasoning check prompts (`examples/reasoning_check.py`) serve as the quality gate for any future KV cache changes. They test attention precision directly — both prompts require the model to hold and reference information from early in the context to produce correct output later.
+
+---
+
+## Step 5: NVFP4 checkpoint (v0.1.4)
+
+**Goal:** Halve expert weight storage via NVFP4 (FP4 E2M1 + two-level microscaling), while keeping the proven `_scaled_mm` FP8 inference path.
+
+**Approach:** Store NVFP4 in the checkpoint, dequant to FP8 at load time. Native FP4 matmul is blocked on sm_121 (CUTLASS/FlashInfer bugs), so we run on the proven pipeline. When native kernels land, the upgrade is localized to the loader.
+
+**NVFP4 format:** Two-level microscaling with block_size=16 (not 32 like MXFP4):
+- Level 1: FP8 E4M3 scale per 16-element micro-block
+- Level 2: FP32 scalar per tensor
+- Storage: uint8 packed (2 nibbles/byte) + fp8 block scales + fp32 tensor scale
+
+**Checkpoint size:**
+
+| Checkpoint | Expert weights | Non-expert (bf16) | Total |
+|---|---|---|---|
+| FP8 (v0.1.0) | ~12.3 GB | ~16.5 GB | ~28.8 GB |
+| NVFP4 (v0.1.4) | ~6.9 GB + scales | ~16.5 GB | ~18 GB |
+| Savings | | | **-37%** |
+
+**Double-quantization error:** bf16->NVFP4->bf16->FP8 vs direct bf16->FP8: ~17% mean relative diff. Acceptable for FP4 coarseness.
+
+**Build:** `uv run examples/build_checkpoint_nvfp4.py` (~2 min, shard-streaming, ~53 GB peak RSS)
+
+**Load:** Every load runs the NVFP4→FP8 conversion (~10s). No on-disk conversion cache. See "The FP8 conversion cache that wasn't" below.
+
+**Usage:** `QUANT_FORMAT=nvfp4 uv run examples/profile_generate.py`
+
+## Step 6: The FP8 conversion cache that wasn't (v0.1.5)
+
+**Context:** The NVFP4 plan called for a `.fp8_cache/` sidecar to avoid re-running conversion on every load. First load would do `NVFP4 → bf16 → FP8` and save the converted FP8 tensors; subsequent loads would read them directly, skipping conversion. The plan estimated this would save 25–45s per subsequent load.
+
+### The adventure
+
+**Attempt 1 — single-file cache.** First implementation saved all 120 expert tensors as one `cached.safetensors` via `save_file(tensors_dict)`. The dict-build step copied all 120 tensors to CPU (`.cpu()`) *before* the file write, accumulating ~23 GB of CPU-side copies on top of the already-loaded ~29 GB CUDA model. On a 128 GB unified-memory GB10 with other agents active, this pushed total usage past 120 GB and triggered kernel swap thrashing — the whole system froze, required a long wait to recover.
+
+**Fix 1 — sharded writes.** Rewrote the cache as per-layer shards (30 files, one per MoE layer, ~727 MB each). Peak CPU-side temp dropped to ~762 MB. First cache build ran cleanly in ~40s.
+
+**Attempt 2 — cache reload.** Second invocation took the cache path. Expected: fast reload. Reality: cache load took **124s**, making total load time 221.7s. The cache path was **75 seconds slower than just reconverting**.
+
+### Why the cache failed its premise
+
+The cache's design assumption was that NVFP4→FP8 conversion would be expensive (plan estimate: 30–60s). The batched-16-experts-at-a-time conversion optimization we added reduced conversion to **9.5s**. The cache paid 124s of disk I/O to skip a 9.5s compute step. The math is a net loss of ~114s per load.
+
+On top of that, the cache-hit path still called `from_pretrained` first (to load non-expert weights), which also loads the NVFP4 expert buffers — **paying disk I/O for the expert data twice** (once as NVFP4, once as FP8) before discarding the NVFP4 copy.
+
+### The decision
+
+**Removed the cache entirely in v0.1.5.** Every NVFP4 load reconverts. Current timing:
+
+| Path | Time |
+|---|---|
+| `from_pretrained` | ~97s |
+| NVFP4→FP8 conversion (batched-16) | ~10s |
+| `_preconvert_fp8_scales` + `torch.compile` wrap | <1s |
+| **Total** | **~107s + torch.compile warmup on first generate** |
+
+Simpler code, no stale-cache risk, no silent freezes, predictable load time.
+
+### The lesson
+
+**When you optimize something, revisit the design decisions that depended on the old cost.** The FP8 cache was a sensible design for a 30–60s conversion. Batching cut conversion to 9.5s. We should have re-evaluated the cache at that point instead of implementing it and only noticing when the runtime measurements didn't match the design's premise.
+
+Two memories saved to help future sessions catch this class of mistake earlier:
+- `feedback_batch_expert_conversion.md` — the optimization that changed the cost
+- `feedback_ask_before_heavy_gpu.md` — the near-miss with system freeze
+
+### When the cache *would* make sense again
+
+If CUTLASS/FlashInfer sm_121 bugs get fixed and we switch to native FP4 inference, we'd keep NVFP4 weights on CUDA (not convert to FP8). At that point the cache question becomes moot — there's no conversion to cache. Current `_convert_nvfp4_experts_to_fp8` becomes dead code we'd remove.

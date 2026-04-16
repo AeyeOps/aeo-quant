@@ -83,6 +83,36 @@ def setup_cuda_allocator(config: str = "expandable_segments:True") -> None:
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", config)
 
 
+def quant_env() -> tuple[str, Path, int]:
+    """Read quantization config from environment.
+
+    Returns:
+        ``(quant_format, checkpoint_path, kv_bits)`` where:
+          - ``quant_format``: ``"fp8"`` (default) or ``"nvfp4"``
+          - ``checkpoint_path``: resolved from ``CHECKPOINT``, ``FP8_CHECKPOINT``,
+            or ``NVFP4_CHECKPOINT`` depending on format
+          - ``kv_bits``: from ``KV_BITS`` env var (default 4 for fp8, 3 for nvfp4)
+
+    Calls ``sys.exit(1)`` if no checkpoint path is found.
+    """
+    import sys
+
+    fmt = os.environ.get("QUANT_FORMAT", "fp8")
+    ckpt = os.environ.get("CHECKPOINT") or os.environ.get(
+        "NVFP4_CHECKPOINT" if fmt == "nvfp4" else "FP8_CHECKPOINT"
+    )
+    if not ckpt:
+        print(
+            f"[FATAL] No checkpoint set for QUANT_FORMAT={fmt}. Set CHECKPOINT "
+            f"or {'NVFP4_CHECKPOINT' if fmt == 'nvfp4' else 'FP8_CHECKPOINT'} "
+            f"in .env or as an env var.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    kv_bits = int(os.environ.get("KV_BITS", "3" if fmt == "nvfp4" else "4"))
+    return fmt, Path(ckpt), kv_bits
+
+
 def results_dir(category: str, *, timestamped: bool = True) -> Path:
     """Create and return a results directory.
 

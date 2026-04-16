@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Build an FP8 checkpoint from a bf16 Gemma 4 model via shard streaming.
+"""Build an NVFP4 checkpoint from a bf16 Gemma 4 model via shard streaming.
 
 Reads the source model's safetensors shards one at a time, quantizes fused
-3D MoE expert weights to FP8 in-flight, and writes sharded output. The full
-bf16 model is never loaded into memory — peak usage is ~18 GB.
+3D MoE expert weights to NVFP4 (E2M1 + FP8 block scales + FP32 tensor scale)
+in-flight, and writes sharded output. The full bf16 model is never loaded
+into memory -- peak usage is ~18 GB.
 
 Usage:
-    uv run python examples/build_checkpoint.py
+    uv run python examples/build_checkpoint_nvfp4.py
 
 Set SOURCE_MODEL in .env to override the base model (default: google/gemma-4-26B-A4B-it).
-Set FP8_CHECKPOINT to control where the output checkpoint is written.
+Set NVFP4_CHECKPOINT to control where the output checkpoint is written.
 """
 from __future__ import annotations
 
@@ -27,10 +28,10 @@ from huggingface_hub import snapshot_download
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-import aeo_quant  # noqa: F401 — triggers np.trapz compat shim before numpy is used
+import aeo_quant  # noqa: F401 -- triggers np.trapz compat shim before numpy is used
 from aeo_quant.core.config import load_dotenv, setup_cuda_allocator
 from aeo_quant.gpu.memory import _GB, enforce_cap, gb, mem_report
-from aeo_quant.gpu.quant import quantize_3d_to_fp8
+from aeo_quant.gpu.quant import quantize_3d_to_nvfp4
 
 load_dotenv()
 setup_cuda_allocator()
@@ -42,10 +43,10 @@ VRAM_CAP_GB = float(os.environ.get("VRAM_CAP_GB", "90.0"))
 SOURCE_MODEL_ID = os.environ.get("SOURCE_MODEL", "google/gemma-4-26B-A4B-it")
 SHARD_SIZE_BYTES = 5 * 1024**3  # 5 GB target shard size
 
-OUTPUT_DIR = os.environ.get("FP8_CHECKPOINT")
+OUTPUT_DIR = os.environ.get("NVFP4_CHECKPOINT")
 if not OUTPUT_DIR:
     print(
-        "[FATAL] FP8_CHECKPOINT not set. Add it to .env — this is where the "
+        "[FATAL] NVFP4_CHECKPOINT not set. Add it to .env -- this is where the "
         "output checkpoint will be written.",
         file=sys.stderr,
     )
@@ -135,14 +136,16 @@ def main() -> None:
                 tensor = f.get_tensor(key)
                 m = _EXPERT_RE.match(key)
                 if m:
-                    # Quantize fused 3D expert weights
-                    weight_fp8, scale = quantize_3d_to_fp8(tensor)
-                    add_tensor(key, weight_fp8)
+                    # Quantize fused 3D expert weights to NVFP4
+                    packed, block_scale, tensor_scale = quantize_3d_to_nvfp4(tensor)
+                    add_tensor(key, packed)
                     proj_name = m.group(2)  # gate_up_proj or down_proj
                     scale_key = key.rsplit(".", 1)[0] + f".{proj_name}_scale"
-                    add_tensor(scale_key, scale.squeeze(-1))
+                    add_tensor(scale_key, block_scale)
+                    scale2_key = key.rsplit(".", 1)[0] + f".{proj_name}_scale_2"
+                    add_tensor(scale2_key, tensor_scale)
                     total_quantized += 1
-                    print(f"    FP8: {key} {tuple(tensor.shape)}")
+                    print(f"    NVFP4: {key} {tuple(tensor.shape)}")
                 else:
                     # Pass through unchanged
                     add_tensor(key, tensor)
@@ -175,14 +178,22 @@ def main() -> None:
     with open(OUTPUT_DIR / "model.safetensors.index.json", "w") as f:
         json.dump(out_index, f, indent=2)
 
-    # Copy config, tokenizer, and template files
+    # Copy config, tokenizer, and template files; add quantization_config
     for pattern in ["config.json", "generation_config.json", "tokenizer*.json",
                      "processor_config.json", "chat_template.jinja"]:
         for src_file in src_dir.glob(pattern):
             shutil.copy2(src_file, OUTPUT_DIR / src_file.name)
 
+    # Add quantization_config to config.json
+    config_path = OUTPUT_DIR / "config.json"
+    with open(config_path) as f:
+        config = json.load(f)
+    config["aeo_quantization"] = {"quant_algo": "NVFP4", "block_size": 16}
+    with open(config_path, "w") as f:
+        json.dump(config, f, indent=2)
+
     mem_report("done")
-    print(f"\n[done] {total_quantized} expert tensors quantized to FP8")
+    print(f"\n[done] {total_quantized} expert tensors quantized to NVFP4")
     print(f"[done] {total_passthrough} tensors passed through unchanged")
     print(f"[done] {actual_shards} output shards written to {OUTPUT_DIR}")
 

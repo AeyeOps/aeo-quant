@@ -23,6 +23,7 @@ from __future__ import annotations
 import ast
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -30,15 +31,14 @@ import torch
 from transformers import AutoTokenizer
 
 import aeo_quant  # noqa: F401 — triggers numpy compat shim
-from aeo_quant.bridges.gemma4.loader import load_gemma4_fp8
-from aeo_quant.core.config import load_dotenv, results_dir, setup_cuda_allocator
+from aeo_quant.core.config import load_dotenv, quant_env, results_dir, setup_cuda_allocator
+from aeo_quant.gpu.memory import mem_report
 
 load_dotenv()
 setup_cuda_allocator()
 
-FP8_CHECKPOINT = os.environ.get("FP8_CHECKPOINT")
+QUANT_FORMAT, CHECKPOINT, KV_BITS = quant_env()
 TOKENIZER_ID = os.environ.get("TOKENIZER_ID", "google/gemma-4-26B-A4B-it")
-KV_BITS = int(os.environ.get("KV_BITS", "4"))
 GEN_TOKENS = 50
 
 PROMPT = (
@@ -60,21 +60,35 @@ def load_token_ids(path: Path) -> list[int]:
 
 
 def main() -> int:
-    if not FP8_CHECKPOINT:
-        print("[FATAL] FP8_CHECKPOINT not set", file=sys.stderr)
-        return 2
+    print(
+        f"[parity] QUANT_FORMAT={QUANT_FORMAT} CHECKPOINT={CHECKPOINT} KV_BITS={KV_BITS}",
+        flush=True,
+    )
+    mem_report("parity:start")
+
     if not torch.cuda.is_available():
         print("[FATAL] CUDA not available", file=sys.stderr)
         return 2
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
+    print(f"[parity] loading tokenizer: {TOKENIZER_ID}", flush=True)
+    t = time.time()
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_ID)
-    model = load_gemma4_fp8(FP8_CHECKPOINT)
+    print(f"[parity] tokenizer loaded in {time.time() - t:.1f}s", flush=True)
 
+    print(f"[parity] loading model from {CHECKPOINT}", flush=True)
+    t = time.time()
+    from aeo_quant.bridges.gemma4.loader import load_gemma4
+    model = load_gemma4(str(CHECKPOINT), quant_format=QUANT_FORMAT)
+    print(f"[parity] model loaded in {time.time() - t:.1f}s (incl. compile wrap)", flush=True)
+    mem_report("parity:after model load")
+
+    print(f"[parity] creating TurboQuant KV cache (bits={KV_BITS})", flush=True)
     from turboquant import TurboQuantCache
     cache = TurboQuantCache(bits=KV_BITS)
 
+    print("[parity] tokenizing prompt", flush=True)
     messages = [
         {"role": "system", "content": "You are a senior Python engineer."},
         {"role": "user", "content": PROMPT},
@@ -84,7 +98,12 @@ def main() -> int:
         add_generation_prompt=True, enable_thinking=True,
     )
     inputs = tokenizer(prompt_str, return_tensors="pt").to(model.device)
+    n_prompt = inputs["input_ids"].shape[-1]
+    print(f"[parity] prompt tokens: {n_prompt}", flush=True)
 
+    print(f"[parity] generating {GEN_TOKENS} tokens (first call triggers compile)", flush=True)
+    mem_report("parity:before generate")
+    t = time.time()
     torch.manual_seed(0)
     with torch.inference_mode():
         outputs = model.generate(
@@ -94,8 +113,17 @@ def main() -> int:
             use_cache=True,
             do_sample=False,
         )
+    gen_elapsed = time.time() - t
+    n_new = outputs.shape[-1] - n_prompt
+    tok_per_s = n_new / gen_elapsed if gen_elapsed > 0 else 0.0
+    print(
+        f"[parity] generated {n_new} tokens in {gen_elapsed:.1f}s "
+        f"({tok_per_s:.2f} tok/s incl. compile warmup)",
+        flush=True,
+    )
+    mem_report("parity:after generate")
 
-    new_ids = outputs[0, inputs["input_ids"].shape[-1]:].tolist()
+    new_ids = outputs[0, n_prompt:].tolist()
     decoded = tokenizer.decode(new_ids, skip_special_tokens=True)
 
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")

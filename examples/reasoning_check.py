@@ -38,17 +38,15 @@ import torch
 from transformers import AutoTokenizer
 
 import aeo_quant  # noqa: F401
-from aeo_quant.bridges.gemma4.loader import load_gemma4_fp8
-from aeo_quant.core.config import load_dotenv, results_dir, setup_cuda_allocator
+from aeo_quant.core.config import load_dotenv, quant_env, results_dir, setup_cuda_allocator
 from aeo_quant.core.writers import Tee
 from aeo_quant.gpu.memory import CudaTimer, mem_report
 
 load_dotenv()
 setup_cuda_allocator()
 
-FP8_CHECKPOINT = os.environ.get("FP8_CHECKPOINT")
+QUANT_FORMAT, CHECKPOINT, KV_BITS = quant_env()
 TOKENIZER_ID = os.environ.get("TOKENIZER_ID", "google/gemma-4-26B-A4B-it")
-KV_BITS = int(os.environ.get("KV_BITS", "4"))
 GEN_TOKENS = int(os.environ.get("GEN_TOKENS", "500"))
 
 RESULTS_DIR = results_dir("reasoning")
@@ -170,9 +168,6 @@ def diff_against_baseline(prompt_info: dict, new_ids: list[int]):
 
 
 def main() -> int:
-    if not FP8_CHECKPOINT:
-        print("[FATAL] FP8_CHECKPOINT not set", file=sys.stderr)
-        return 2
     if not torch.cuda.is_available():
         print("[FATAL] CUDA not available", file=sys.stderr)
         return 2
@@ -189,7 +184,8 @@ def main() -> int:
     print(f"[reasoning] gen_tokens: {GEN_TOKENS}")
     mem_report("start")
 
-    model = load_gemma4_fp8(str(FP8_CHECKPOINT))
+    from aeo_quant.bridges.gemma4.loader import load_gemma4
+    model = load_gemma4(str(CHECKPOINT), quant_format=QUANT_FORMAT)
     mem_report("model loaded")
 
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_ID)

@@ -181,3 +181,19 @@ The building blocks (`LinearFP8`, `quantize_2d_to_fp8`) are retained in the code
 | `torch.compile(mode="reduce-overhead")` | **10.08** | **+29%** |
 
 Peak VRAM: 26.95 GB. Parity: byte-for-byte match with FP8 baseline across all shipped steps.
+
+### Rejected: E5M2 as alternative to E4M3 for weight quantization
+
+Researched whether `torch.float8_e5m2` (2 mantissa bits, range [-57344, 57344]) would give better precision than `torch.float8_e4m3fn` (3 mantissa bits, range [-448, 448]) for the non-MoE weights where E4M3 caused quality loss.
+
+Findings:
+- **Hardware blocks it.** On Blackwell sm_121, `torch._scaled_mm` with RowWise scaling (our scaling mode) **requires B (weight) matrix to be E4M3**. E5M2 weights are only supported with TensorWise (scalar) scaling, which is strictly worse.
+- **Precision is worse.** E5M2 has half the mantissa precision of E4M3 (4 steps vs 8 steps per exponent interval). Empirical round-trip error: E5M2 shows 1.57x higher NRMAE than E4M3 at the same scaling granularity, even on tensors with outlier columns simulating attention weight distributions.
+- **Range advantage is irrelevant.** Per-row scaling already normalizes dynamic range into the representable interval. E5M2's 128x wider range provides zero benefit when each row has its own scale.
+- **Literature consensus.** E4M3 for inference (weights + activations). E5M2 exists for training gradients where wide range handles gradient spikes. No published work recommends E5M2 for inference weights.
+
+E4M3 is already the right format. The 46% divergence from non-MoE FP8 quantization is a layer-sensitivity problem (cumulative error through 24 layers + LM head argmax sensitivity), not a format problem. Potential future directions: mixed precision (LM head stays bf16), finer-grained scaling (blockwise 1x128 or MXFP8 1x32), or NVFP4.
+
+### Not yet tested: TurboQuant 3-bit KV cache
+
+Current configuration uses `TurboQuantCache(bits=4)`. TurboQuant's default is actually `bits=3` — we're more conservative than the library's own default. Dropping to 3-bit would give ~25% less KV cache memory (5.3x vs 4x compression) with negligible quality loss per TurboQuant benchmarks on 3B+ models. No code change in the library needed — just `bits=3`. Worth a parity check to verify on Gemma 4.

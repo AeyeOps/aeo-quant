@@ -23,7 +23,7 @@ Pre-built checkpoint ready to download and run.
 > a workaround became something we want to reuse and share with the
 > community."*
 >
-> — Steve Antonakakis, AeyeOps
+> — Steve, AeyeOps
 
 ---
 

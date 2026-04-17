@@ -30,3 +30,4 @@ results/
 
 # Parity baselines (generated locally)
 tests/fixtures/parity_baseline*.txt
+tests/fixtures/parity_long_baseline*.txt

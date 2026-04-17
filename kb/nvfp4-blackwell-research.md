@@ -100,3 +100,104 @@ GB10 has **99 KiB smem per SM**, vs 228 KiB on B200. B200 default tiles for Trit
 - NVIDIA dev forum — "tcgen05 FP4 support for DGX Spark GB10 sm121"
 - Veitner — NVFP4 GEMV: https://veitner.bearblog.dev/nvfp4-gemv/
 - advpropsys/fp4-blackwell-bench
+
+---
+
+## Deep re-survey — 2026-04-17 (corrections + new findings)
+
+Originally drafted 2026-04-16; several claims were wrong. This section supersedes.
+
+### 1. `sm_121f` is NOT a Triton target string
+
+Verified in the installed Triton 3.6.0 wheel on this box:
+```python
+# triton/backends/nvidia/compiler.py
+def sm_arch_from_capability(capability: int):
+    suffix = "a" if capability >= 90 else ""
+    return f"sm_{capability}{suffix}"
+# sm_arch_from_capability(121) → "sm_121a"
+```
+The `_parse_arch` regex is `^sm(\d+)$` — any non-digit suffix is rejected. `TRITON_OVERRIDE_ARCH=sm_121f` fails. `GPUTarget` is a 3-tuple `(backend, arch_int, warp_size)`, not `(backend, cap, variant_char)`.
+
+**Correction to plan:** "Delta 3 — sm_121f compile target" is moot. Triton 3.6.0 already emits `sm_121a`; there is no "f" suffix to force. PR #9734 tried to change this, was reverted in PR #9755 (2026-03-17) per NVIDIA feedback.
+
+### 2. triton#8548 was never fixed
+
+Issue was closed by the original reporter one day after opening, no PR merged. Lezcano's only comment: *"Is this AI generated? Those changes are clearly not correct."* The actual sm_121 enablement attempt was PR #8484 ("sm120/121 via sm80 fallback"), closed unmerged 2025-11-21. Umbrella tracker #8335 (closed) noted masahi's workaround commit 66d39cc was "not landable" because it makes sm_120/121 behave as sm_80.
+
+**Correction to plan:** "Delta 2 — bypass the `matmul_ogs` TMA guard" oversimplifies. The real blocker is one-deeper: Triton's `lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp` has a hard `computeCapability != 120 → failure` in the native-FP4 `ScaledBlockedToMMA` path (added PR #8494, merged 2025-10-20). On sm_121, `tl.dot_scaled` with FP4 falls through to the tcgen05/MMAv5 path that **cannot run on GB10 hardware at all**.
+
+### 3. GB10 has `mma.sync...mxf4/nvf4`, NOT `tcgen05.mma.*`
+
+NVIDIA employee `caelunshun` on CUTLASS #2947 (2026-01-11): *"The `tcgen05` instructions do not exist for SM121, so this is not possible to fix. The `mma` instructions with FP4 precision do, however, exist."*
+
+This is the single most important hardware fact. Any code path targeting `tcgen05.mma.fp4` on GB10 is DOA. The correct PTX instruction is warp-level `mma.sync.aligned.{shape}.row.col.kind::mxf4.f32.e2m1.e2m1.f32` (or `kind::nvf4` for the two-level NVFP4 form). Tensor memory (`tmem`) and the `tcgen05` family don't exist on this chip.
+
+### 4. torchao's `_addmm_nvfp4_dispatch` routes through `_scaled_mm` → cuBLAS
+
+Read at `torchao/prototype/mx_formats/nvfp4_tensor.py` line 506:
+```python
+result = torch._scaled_mm(
+    a.qdata.view(torch.float4_e2m1fn_x2),
+    b.qdata.view(torch.float4_e2m1fn_x2),
+    a_scale_blocked.view(torch.float8_e4m3fn),
+    b_scale_blocked.view(torch.float8_e4m3fn),
+    ...
+)
+```
+`torch._scaled_mm` with FP4×FP4 routes to cuBLAS; cuBLAS's `fp4_e2m1fn_x2` path is B200 / sm_100 only as of CUDA 13.1. On sm_121 it either errors ("Not implemented") or silently falls back. Confirmed failure in the wild: vLLM #30163 reports *"[FP4 gemm Runner] Failed to run cutlass FP4 gemm on sm120"* on DGX Spark. torchao's own tracker (#3102) states: *"`_addmm_nvfp4_dispatch` only supported on B200 currently."*
+
+**Correction to plan:** The 20-minute probe will likely fail. Still worth running — the exact error string tells us which layer rejected us.
+
+### 5. CUTLASS gap is real and recent
+
+Live open issues as of today:
+- CUTLASS #2802 — `BlockScaledMmaOp.admissible_archs = [Arch.sm_100a]` rejects sm_121 hard
+- CUTLASS #2800 — "expects arch to be one of ['sm_100a','sm_100f'], but got sm_121a"
+- CUTLASS #3100 — `nvidia-cutlass-dsl==4.4.1` has no SM121 SASS; override fails at runtime
+- CUTLASS #3144 — `StageCountAutoCarveout` assumes max family SMEM, breaks at 99 KiB/SM
+- CUTLASS #3096 (2026-04-14, "With Fix") — SM120 NVFP4 MoE produces garbage; user patched FlashInfer 0.6.5 + CuTe DSL arch whitelist manually, got 39 tok/s
+
+CuTe DSL 4.5 wheel with SM121 SASS is the unreleased upstream gate. Until then, no drop-in kernel path.
+
+### 6. FlashInfer b12x is SM120-only (explicitly)
+
+Merged PRs #3051 (2026-04-14) and #3066 (2026-04-15) add `backend="b12x"` for SM120. Both explicitly: *"SM121 (Spark) is not yet supported pending a nvidia-cutlass-dsl==4.5 wheel release."* vLLM issue #40082 (2026-04-17) tracks vLLM's integration of FlashInfer b12x.
+
+### 7. TMA works on sm_121 in Triton 3.6.0
+
+PR #8498 (merged 2025-10-24, shipped in 3.6.0) enabled TMA scatter/gather4 for sm_121. The TMA path itself is fine — what breaks is the downstream FP4 MMA lowering. This means a tutorial-10-style kernel can load scales via 5D TMA descriptors without issue.
+
+### 8. ptxas version in the 3.6.0 wheel is Blackwell-capable
+
+PR #8941 upgraded bundled ptxas to 13.1 (merged 2025-12-11, in 3.6.0). No need to symlink CUDA 13 ptxas like vLLM 0.11 users hit — our wheel is fine.
+
+### Strategic implications
+
+Two realistic kernel paths from here (ranked by estimated effort):
+
+**Path A — Patch Triton's AccelerateMatmul check and use `tl.dot_scaled`:**
+1. Monkey-patch or fork `lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp` to accept `computeCapability == 121` for the native-FP4 MMAv2 path.
+2. Verify the generated SASS uses `mma.sync...kind::mxf4` (not `tcgen05.mma.*`).
+3. If tcgen05 is emitted, we need to force the MMAv2 (warp-level) codegen, not MMAv5 — this likely requires a second patch to the MMA version selection.
+4. Build Triton from source (the monkey-patch option doesn't work for C++; we need to either patch-and-rebuild or use a pre-built patched wheel).
+
+**Path B — Inline PTX kernel in Triton:**
+1. Write a `@triton.jit` kernel that uses `tl.inline_asm_elementwise` to emit `mma.sync.aligned.m16n8k32.kind::mxf4.f32.e2m1.e2m1.f32` directly.
+2. Handle scale application in kernel (fold per-tensor fp32 in epilogue, apply fp8 block scales inside loop).
+3. Ship a minimal kernel that doesn't depend on `tl.dot_scaled` lowering at all.
+4. Bigger up-front effort, but no Triton fork to maintain.
+
+**Path C (emergency fallback) — CUDA C++ kernel:**
+1. Write in plain CUDA with inline PTX, compile with nvcc to a .so, load via torch.ops or cffi.
+2. Maximum control but maximum scaffolding.
+3. Reserved if A and B both hit walls.
+
+### Sources cited in this section
+
+- triton-lang/triton: PRs #8484, #8494, #8498, #8941, #9734, #9755; Issues #8548, #8335
+- pytorch/ao: `nvfp4_tensor.py` source; Issues #3102, #4040; PR #4188
+- NVIDIA/cutlass: Issues #2800, #2802, #2947, #3096, #3100, #3144
+- flashinfer-ai/flashinfer: PRs #3051, #3066, #3080; Issue #3013
+- vllm-project/vllm: Issues #30163, #40082; PR #39920
+- Local verification: `uv run python -c "from triton.backends.nvidia.compiler import sm_arch_from_capability; print(sm_arch_from_capability(121))"` → `sm_121a`

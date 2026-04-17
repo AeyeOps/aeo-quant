@@ -1,8 +1,16 @@
 # Native NVFP4 matmul for Gemma 4 26B-A4B on GB10 (sm_121)
 
-**Status:** draft spec, not yet started. Owner: aeo-quant. Stack: `transformers.generate()` + our bridge — not vLLM/TRT-LLM/llama.cpp.
+**Status:** in progress (2026-04-17). Owner: aeo-quant. Stack: `transformers.generate()` + our bridge — not vLLM/TRT-LLM/llama.cpp.
 
-**Starting point reference:** `kb/nvfp4-blackwell-research.md` "Native NVFP4 matmul path on sm_121 — 2026-04-16 survey".
+**Starting point reference:** `kb/nvfp4-blackwell-research.md`, especially the 2026-04-17 re-survey section which corrects several 2026-04-16 assumptions.
+
+**Major corrections to original plan (2026-04-17):**
+- `sm_121f` is NOT a real Triton target string. 3.6.0 only emits `sm_121a`. Delta 3 below is obsolete.
+- triton#8548 was never fixed. The real blocker is `AccelerateMatmul.cpp`'s `computeCapability != 120 → failure` in the native-FP4 MMAv2 lowering path (PR #8494).
+- GB10 has `mma.sync...kind::mxf4/nvf4` but NOT `tcgen05.mma.*`. Any tcgen05-path kernel is DOA — we target warp-level MMA only.
+- torchao's `_addmm_nvfp4_dispatch` routes to `_scaled_mm`, which routes to cuBLAS, which lacks sm_121 FP4 support. The probe is still worth running, but expected-to-fail.
+- TMA on sm_121 in Triton 3.6.0 **does** work (PR #8498 shipped). The TMA load path is fine; only MMA lowering is broken.
+- Revised kernel strategy: Path A (patch `AccelerateMatmul.cpp` to accept sm_121) or Path B (inline-PTX `mma.sync...kind::nvf4` kernel). See re-survey section 8.
 
 ---
 
@@ -86,15 +94,23 @@ The tutorial code is wrapped in a higher-level dispatcher `matmul_ogs.py` which 
 
 TMA descriptors on sm_121 need testing — known working on sm_100. If TMA itself hits a path that needs the fix, fall back to `tl.load` with `block_ptr` (non-TMA). Non-TMA on Blackwell is ~15–25% slower but still beats FP8; it's an acceptable fallback if TMA blocks us.
 
-### Delta 3 — sm_121f compile target
+### Delta 3 — compile target on sm_121 (REVISED 2026-04-17)
 
-Default Triton auto-detection on this box lowers to `sm_100a` and silently mis-emits FP4 instructions. Force the target:
-```python
-kernel[grid](..., extern_libs={"libdevice": ...}, target=("cuda", 121, "f"))
+**Original plan was wrong.** There is no `sm_121f` target. Triton 3.6.0 maps capability `(12,1)` to `sm_121a` via `sm_arch_from_capability` (verified in installed wheel). `TRITON_OVERRIDE_ARCH=sm_121f` fails the `^sm(\d+)$` regex.
+
+The actual problem: `tl.dot_scaled` on sm_121 hits a dead path in `AccelerateMatmul.cpp`:
+```cpp
+// lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp (Triton 3.6.0, line ~665)
+if (computeCapability != 120) return failure();  // ScaledBlockedToMMA (native FP4)
 ```
-or via `TRITON_OVERRIDE_ARCH=sm_121f` env var, or `torch.cuda.get_device_capability()` override.
+On sm_121, this returns failure and the rewriter falls through to the MMAv5/tcgen05 path, which cannot run on GB10 hardware (tcgen05 instructions don't exist for sm_121).
 
-Verify post-compile with `cuobjdump --dump-sass` on the compiled cubin that the issued opcode is `tcgen05.mma.fp4` and the arch header reads `sm_121f`. This check goes in the kernel-level test, not just at runtime.
+**Two options for getting native FP4 codegen:**
+
+- **A. Source patch (cleaner):** relax the check to `computeCapability != 120 && computeCapability != 121`, rebuild Triton wheel, install locally.
+- **B. Inline PTX (no Triton fork):** write the kernel with `tl.inline_asm_elementwise` emitting `mma.sync.aligned.m16n8k32.row.col.kind::mxf4.f32.e2m1.e2m1.f32` directly. Bypasses Triton's MMA lowering entirely.
+
+Verify post-compile with `cuobjdump --dump-sass` that the issued opcode is `HMMA` with the `mxf4/nvf4` mnemonic (not `QMMA.tcgen05`). Arch header will read `sm_121a`, which is correct — the relevant fact is the MMA variant, not the sm suffix.
 
 ---
 

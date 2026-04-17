@@ -56,6 +56,95 @@ def _swap_nibbles(x):
 
 
 @triton.jit
+def _nvfp4_matmul_kernel_3d(
+    a_ptr, b_ptr,
+    a_scale_ptr, b_scale_ptr,
+    c_ptr,
+    alpha,  # fp32 scalar — folded a_tensor_scale * w_tensor_scale
+    M, N, K,
+    stride_am, stride_ak,
+    stride_be, stride_bn, stride_bk,
+    stride_am_scale, stride_ak_scale,
+    stride_be_scale, stride_bn_scale, stride_bk_scale,
+    stride_ce, stride_cm, stride_cn,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    VEC_SIZE: tl.constexpr,
+    ELEM_PER_BYTE: tl.constexpr,
+    NUM_STAGES: tl.constexpr,
+):
+    """Per-expert batched block-scaled NVFP4 matmul.
+
+    Same body as :func:`_nvfp4_matmul_kernel` but with an additional
+    ``pid_e`` program axis that offsets the b (weight) and c (output)
+    pointers by one expert's slab. The activation is shared across
+    experts (no pid_e on a pointers).
+
+    Shapes:
+      a:       (M, K/ELEM_PER_BYTE) uint8             — shared across experts
+      b:       (E, N, K/ELEM_PER_BYTE) uint8          — per-expert weights
+      a_scale: (M, K/VEC_SIZE) fp8_e4m3fn
+      b_scale: (E, N, K/VEC_SIZE) fp8_e4m3fn
+      c:       (E, M, N) bf16
+
+    Grid: ``(triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N), E)``.
+    Alpha is a scalar — correct when w_tensor_scale is shared across
+    experts (as in our Gemma 4 NVFP4 checkpoint: *_scale_2 is a single
+    scalar per projection).
+    """
+    pid_mn = tl.program_id(axis=0)
+    pid_e = tl.program_id(axis=1)
+    num_pid_m = tl.cdiv(M, BLOCK_M)
+    pid_m = pid_mn % num_pid_m
+    pid_n = pid_mn // num_pid_m
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+
+    offs_k_packed_base = tl.arange(0, BLOCK_K // ELEM_PER_BYTE)
+    offs_k_scale_base = tl.arange(0, BLOCK_K // VEC_SIZE)
+
+    b_expert_base = b_ptr + pid_e * stride_be
+    b_scale_expert_base = b_scale_ptr + pid_e * stride_be_scale
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    for k_block in tl.range(0, K // BLOCK_K, num_stages=NUM_STAGES):
+        k_packed_start = k_block * (BLOCK_K // ELEM_PER_BYTE)
+        k_scale_start = k_block * (BLOCK_K // VEC_SIZE)
+
+        a_ptrs = (a_ptr
+                  + offs_m[:, None] * stride_am
+                  + (k_packed_start + offs_k_packed_base)[None, :] * stride_ak)
+        b_ptrs = (b_expert_base
+                  + offs_n[:, None] * stride_bn
+                  + (k_packed_start + offs_k_packed_base)[None, :] * stride_bk)
+        a_scale_ptrs = (a_scale_ptr
+                        + offs_m[:, None] * stride_am_scale
+                        + (k_scale_start + offs_k_scale_base)[None, :] * stride_ak_scale)
+        b_scale_ptrs = (b_scale_expert_base
+                        + offs_n[:, None] * stride_bn_scale
+                        + (k_scale_start + offs_k_scale_base)[None, :] * stride_bk_scale)
+
+        a_raw = tl.load(a_ptrs)
+        b_raw = tl.load(b_ptrs)
+        a = _swap_nibbles(a_raw)
+        b = _swap_nibbles(b_raw)
+        a_scale = tl.load(a_scale_ptrs)
+        b_scale = tl.load(b_scale_ptrs)
+
+        acc = tl.dot_scaled(a, a_scale, "e2m1", b.T, b_scale, "e2m1", acc)
+
+    acc = acc * alpha
+
+    c_ptrs = (c_ptr
+              + pid_e * stride_ce
+              + offs_m[:, None] * stride_cm
+              + offs_n[None, :] * stride_cn)
+    c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+    tl.store(c_ptrs, acc.to(tl.bfloat16), mask=c_mask)
+
+
+@triton.jit
 def _nvfp4_matmul_kernel(
     a_ptr, b_ptr,
     a_scale_ptr, b_scale_ptr,
@@ -337,3 +426,119 @@ def nvfp4_linear_prequantized(
     else:
         c = c_padded
     return c
+
+
+def nvfp4_linear_3d_prequantized(
+    a_packed: torch.Tensor,
+    a_block_scale: torch.Tensor,
+    a_tensor_scale: torch.Tensor,
+    w_packed: torch.Tensor,
+    w_block_scale: torch.Tensor,
+    w_tensor_scale: torch.Tensor,
+    *,
+    out_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """Batched per-expert NVFP4 matmul: E experts share one (M, K) activation.
+
+    Used for Gemma 4 MoE decode where top-k experts are gathered into a
+    dense (k, N, K) slab and run in one kernel launch instead of k
+    separate 2D matmuls.
+
+    Args:
+        a_packed:        (M, K // 2) uint8 — shared across experts.
+        a_block_scale:   (M, K // 16) fp8_e4m3fn.
+        a_tensor_scale:  fp32 scalar.
+        w_packed:        (E, N, K // 2) uint8 — per-expert weights.
+        w_block_scale:   (E, N, K // 16) fp8_e4m3fn.
+        w_tensor_scale:  fp32 scalar — shared across experts (matches the
+                         Gemma 4 NVFP4 checkpoint's *_scale_2 layout).
+        out_dtype:       bf16 (default) or fp32.
+
+    Returns:
+        (E, M, N) of ``out_dtype``.
+    """
+    if a_packed.ndim != 2:
+        raise ValueError(
+            f"a_packed must be 2D (M, K//2); got shape {tuple(a_packed.shape)}"
+        )
+    if w_packed.ndim != 3:
+        raise ValueError(
+            f"w_packed must be 3D (E, N, K//2); got shape {tuple(w_packed.shape)}"
+        )
+
+    M, K_half_a = a_packed.shape
+    E, N, K_half_w = w_packed.shape
+    if K_half_a != K_half_w:
+        raise ValueError(
+            f"activation K//2={K_half_a} must equal weight K//2={K_half_w}"
+        )
+    K = K_half_a * 2
+
+    alpha = (a_tensor_scale.float() * w_tensor_scale.float()).item()
+
+    # Same tile-selection heuristic as the 2D wrapper.
+    if M <= 16:
+        BLOCK_M = 16
+    elif M <= 32:
+        BLOCK_M = 32
+    elif M <= 64:
+        BLOCK_M = 64
+    else:
+        BLOCK_M = 128
+    BLOCK_N = 128
+    BLOCK_K = 128 if K % 128 == 0 else 64
+    NUM_STAGES = 2
+    NUM_WARPS = 4
+
+    if N % BLOCK_N != 0:
+        raise ValueError(
+            f"N={N} must be divisible by BLOCK_N={BLOCK_N}. Pad upstream."
+        )
+    if K % BLOCK_K != 0:
+        raise ValueError(
+            f"K={K} must be divisible by BLOCK_K={BLOCK_K}. Pad upstream."
+        )
+
+    M_padded = ((M + BLOCK_M - 1) // BLOCK_M) * BLOCK_M
+    if M_padded != M:
+        a_packed_padded = torch.zeros(
+            M_padded, a_packed.shape[1],
+            dtype=a_packed.dtype, device=a_packed.device,
+        )
+        a_packed_padded[:M] = a_packed
+        a_block_scale_padded = torch.zeros(
+            M_padded, a_block_scale.shape[1],
+            dtype=a_block_scale.dtype, device=a_block_scale.device,
+        )
+        a_block_scale_padded[:M] = a_block_scale
+        a_packed = a_packed_padded
+        a_block_scale = a_block_scale_padded
+        c_padded = torch.empty(
+            (E, M_padded, N), dtype=out_dtype, device=a_packed.device,
+        )
+    else:
+        c_padded = torch.empty((E, M, N), dtype=out_dtype, device=a_packed.device)
+
+    grid = (triton.cdiv(M_padded, BLOCK_M) * triton.cdiv(N, BLOCK_N), E)
+
+    _nvfp4_matmul_kernel_3d[grid](
+        a_packed, w_packed,
+        a_block_scale, w_block_scale,
+        c_padded,
+        alpha,
+        M_padded, N, K,
+        a_packed.stride(0), a_packed.stride(1),
+        w_packed.stride(0), w_packed.stride(1), w_packed.stride(2),
+        a_block_scale.stride(0), a_block_scale.stride(1),
+        w_block_scale.stride(0), w_block_scale.stride(1), w_block_scale.stride(2),
+        c_padded.stride(0), c_padded.stride(1), c_padded.stride(2),
+        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
+        VEC_SIZE=NVFP4_BLOCK_SIZE,
+        ELEM_PER_BYTE=2,
+        NUM_STAGES=NUM_STAGES,
+        num_warps=NUM_WARPS,
+    )
+
+    if M_padded != M:
+        return c_padded[:, :M, :]
+    return c_padded

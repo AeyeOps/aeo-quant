@@ -2,6 +2,62 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.8] - 2026-04-16
+
+### Added
+
+- **Harness daemon** (`aeo_quant.harness`) — a long-running UNIX-socket
+  service that loads the Gemma 4 model once and serves workload requests
+  from multiple clients. First call to an example auto-spawns the daemon
+  in the background; subsequent calls connect instantly to the already-
+  loaded model, eliminating the ~140s load cost per invocation. Daemon
+  is mutually-exclusive on `QUANT_FORMAT` — switching formats requires
+  `aeo-harness stop && <new-format example>` which auto-spawns a fresh
+  daemon.
+  - `aeo-harness start [--format fp8|nvfp4]` — foreground or auto-spawn
+  - `aeo-harness status` — current format, uptime, jobs_served, queue_depth
+  - `aeo-harness stop` — graceful shutdown, frees ~27 GB
+  - Socket at `~/.aeo-quant/harness.sock`, log at `~/.aeo-quant/harness.log`
+- **Workloads subsystem** (`aeo_quant.workloads`) — pure-compute functions
+  callable either in-process or via the harness. First workload landed:
+  `workloads.parity.run()`. Additional workloads (reasoning, quality,
+  multi_turn) arrive in a follow-up.
+- **Log tailing during daemon spawn** — when an example auto-spawns the
+  daemon, the parent streams `~/.aeo-quant/harness.log` to the user's
+  terminal during the ~140s model load, so you see live progress (shard
+  loading, NVFP4→FP8 conversion, etc.) instead of an opaque
+  "waiting..." message.
+- **Streaming event protocol** — server can emit zero or more
+  `status: event` lines before the terminal `status: ok`/`status: error`
+  reply. Clients receive events via a default stdout printer or an
+  optional `on_event` callback — no opt-in required. Unlocks long-running
+  workloads (multi_turn, future chat) with live progress without adding
+  configuration surface.
+- **Thread-pool workload execution on the server** — workloads now run
+  via `loop.run_in_executor`, keeping the asyncio event loop responsive
+  during generate() calls so streaming events flow in real time and
+  concurrent `status` probes work.
+
+### Changed
+
+- **`examples/parity_check.py`** — refactored to always use the harness.
+  `get_or_start_harness()` replaces the earlier manual load path;
+  in-process fallback removed (failing loudly is more honest than
+  silently reloading a 27 GB model when the daemon is misconfigured).
+  Format mismatch between daemon and requested `QUANT_FORMAT` is a fatal
+  error with clear remediation text.
+- **`pyproject.toml`** — added `[project.scripts]` entry point for
+  `aeo-harness`.
+
+### Fixed
+
+- **`Tee.write` / `Tee.flush` resilient to closed streams.** At interpreter
+  shutdown, `atexit` may close the log file before Python's final
+  `sys.stdout.flush()` runs, producing `Exception ignored while flushing
+  sys.stdout` on `reasoning_check` and `profile_generate`. `Tee` now
+  suppresses per-stream `ValueError`/`OSError` so one dead stream doesn't
+  kill the other, and shutdown is clean.
+
 ## [0.1.7] - 2026-04-16
 
 ### Changed

@@ -29,19 +29,31 @@ def _extract_assistant_text(segments: list[Segment] | None) -> str | None:
 
 
 class Tee:
-    """Write to multiple streams simultaneously (e.g. stdout + log file)."""
+    """Write to multiple streams simultaneously (e.g. stdout + log file).
+
+    Resilient to individual closed streams. At interpreter shutdown, atexit
+    may close one underlying stream before Python's final stdout flush runs;
+    catching per-stream errors keeps the other streams working and avoids
+    an "Exception ignored while flushing sys.stdout" unraisable at exit.
+    """
 
     def __init__(self, *streams):
         self.streams = streams
 
     def write(self, data):
         for s in self.streams:
-            s.write(data)
-            s.flush()
+            try:
+                s.write(data)
+                s.flush()
+            except (ValueError, OSError):
+                pass
 
     def flush(self):
         for s in self.streams:
-            s.flush()
+            try:
+                s.flush()
+            except (ValueError, OSError):
+                pass
 
 
 class JSONLWriter:

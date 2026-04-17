@@ -112,10 +112,28 @@ class Gemma4TextExpertsNVFP4(Gemma4TextExperts):
         Routes each selected expert's gate_up_proj and down_proj through
         :func:`nvfp4_linear`.  Mirrors the dispatch and combine logic of
         :class:`Gemma4TextExpertsFP8.forward`.
+
+        Optimization: the full ``hidden_states`` is quantized once
+        up-front, and each expert slices the packed form rather than
+        re-quantizing its own token slice.  Saves roughly (top_k - 1)
+        activation-quant passes per layer per token — with 10+ small
+        elementwise launches each, meaningful in the decode path.
         """
-        # Lazy import so the load-only path (no native inference) doesn't
+        # Lazy imports so the load-only path (no native inference) doesn't
         # need Triton at import time.
-        from aeo_quant.gpu.nvfp4_matmul import nvfp4_linear
+        from aeo_quant.gpu.nvfp4_matmul import (
+            nvfp4_linear,
+            nvfp4_linear_prequantized,
+        )
+        from aeo_quant.gpu.quant import quantize_2d_to_nvfp4
+
+        # Pre-quantize hidden_states once (reused across every selected
+        # expert's gate_up_proj).  Per-expert token slicing then works
+        # on the packed form without any more activation-quant work.
+        with _moe_range("nvfp4_moe_prequant"):
+            h_packed, h_block_scale, h_tensor_scale = quantize_2d_to_nvfp4(
+                hidden_states
+            )
 
         final_hidden_states = torch.zeros_like(hidden_states)
         with _moe_range("nvfp4_moe_route"), torch.no_grad():
@@ -132,11 +150,12 @@ class Gemma4TextExpertsNVFP4(Gemma4TextExperts):
             if expert_idx == self.num_experts:
                 continue
             top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
-            current_state = hidden_states[token_idx]
 
             with _moe_range("nvfp4_moe_gate_up"):
-                gate_up = nvfp4_linear(
-                    current_state,
+                gate_up = nvfp4_linear_prequantized(
+                    h_packed[token_idx],
+                    h_block_scale[token_idx],
+                    h_tensor_scale,
                     self.gate_up_proj[expert_idx],
                     self.gate_up_proj_scale[expert_idx],
                     self.gate_up_proj_scale_2,
@@ -145,6 +164,8 @@ class Gemma4TextExpertsNVFP4(Gemma4TextExperts):
                 current_hidden_states = self.act_fn(gate) * up
 
             with _moe_range("nvfp4_moe_down"):
+                # down_proj input is per-expert (distinct gate*up output
+                # per expert), so this still uses the runtime-quant path.
                 current_hidden_states = nvfp4_linear(
                     current_hidden_states,
                     self.down_proj[expert_idx],

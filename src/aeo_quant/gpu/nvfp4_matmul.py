@@ -198,23 +198,59 @@ def nvfp4_linear(
     if x_bf16.ndim != 2:
         x_bf16 = x_bf16.reshape(-1, orig_shape[-1])
 
-    M, K = x_bf16.shape
-    N = w_packed.shape[0]
-    assert w_packed.shape[1] == K // 2, (
-        f"K mismatch: input K={K} expects w_packed[:,:{K//2}], got {w_packed.shape}"
-    )
-    assert w_block_scale.shape == (N, K // NVFP4_BLOCK_SIZE), (
-        f"w_block_scale shape: expected ({N}, {K // NVFP4_BLOCK_SIZE}), "
-        f"got {tuple(w_block_scale.shape)}"
-    )
-
     # Activation quant (per-row dynamic)
     a_packed, a_block_scale, a_tensor_scale = _quantize_bf16_activation_to_nvfp4(x_bf16)
+
+    out = nvfp4_linear_prequantized(
+        a_packed, a_block_scale, a_tensor_scale,
+        w_packed, w_block_scale, w_tensor_scale,
+        out_dtype=out_dtype,
+    )
+
+    if len(orig_shape) > 2:
+        out = out.reshape(*orig_shape[:-1], out.shape[-1])
+    return out
+
+
+def nvfp4_linear_prequantized(
+    a_packed: torch.Tensor,
+    a_block_scale: torch.Tensor,
+    a_tensor_scale: torch.Tensor,
+    w_packed: torch.Tensor,
+    w_block_scale: torch.Tensor,
+    w_tensor_scale: torch.Tensor,
+    *,
+    out_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """Same as :func:`nvfp4_linear` but the activation is already quantized.
+
+    Useful when the same activation is reused across multiple experts
+    (MoE): quantize the full ``hidden_states`` once at the top of the
+    layer's forward, then slice the packed form per expert.  Avoids
+    the ~10 small elementwise kernel launches that
+    ``_quantize_bf16_activation_to_nvfp4`` does per call.
+
+    Args:
+        a_packed:        (M, K // 2) uint8 — packed activation nibbles.
+        a_block_scale:   (M, K // 16) fp8_e4m3fn — level-1 scales.
+        a_tensor_scale:  fp32 scalar.
+        w_packed:        (N, K // 2) uint8.
+        w_block_scale:   (N, K // 16) fp8_e4m3fn.
+        w_tensor_scale:  fp32 scalar.
+        out_dtype:       defaults to bf16.
+
+    Returns:
+        (M, N) of ``out_dtype``.
+    """
+    M = a_packed.shape[0]
+    K_half = a_packed.shape[1]
+    K = K_half * 2
+    N = w_packed.shape[0]
 
     # Fold the two tensor scales into a single epilogue fmul.
     alpha = (a_tensor_scale.float() * w_tensor_scale.float()).item()
 
-    c = torch.empty((M, N), dtype=out_dtype, device=x_bf16.device)
+    c = torch.empty((M, N), dtype=out_dtype, device=a_packed.device)
 
     # Tile selection.  Decode path (M small) lowers BLOCK_M so we don't
     # waste tensor-core lanes on zero-padded rows.
@@ -271,7 +307,7 @@ def nvfp4_linear(
         a_packed = a_packed_padded
         a_block_scale = a_block_scale_padded
         c_padded = torch.empty(
-            (M_padded, N), dtype=out_dtype, device=x_bf16.device,
+            (M_padded, N), dtype=out_dtype, device=a_packed.device,
         )
     else:
         c_padded = c
@@ -300,9 +336,4 @@ def nvfp4_linear(
         c = c_padded[:M]
     else:
         c = c_padded
-
-    if out_dtype == torch.float32:
-        c = c.float()
-    if len(orig_shape) > 2:
-        c = c.reshape(*orig_shape[:-1], N)
     return c

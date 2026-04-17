@@ -126,14 +126,15 @@ def _make_inputs():
     a_packed, a_scale, a_tensor_scale = quantize_2d_to_nvfp4(a_bf16)
     b_packed, b_scale, b_tensor_scale = quantize_2d_to_nvfp4(b_bf16)
 
-    # Dequantize back to bf16 for reference (so reference matches what
-    # the FP4 kernel would produce on exact arithmetic — minus accum order)
+    # Dequantize back to bf16 for reference.  dequant_2d_from_nvfp4
+    # already folds both block_scale AND tensor_scale into the result,
+    # so the reference is just a plain matmul.  The probe kernel itself
+    # doesn't fold tensor_scales — it only applies block_scales — so
+    # the kernel output needs to be scaled by (a_tensor_scale * b_tensor_scale)
+    # to be directly comparable.
     a_bf16_q = dequant_2d_from_nvfp4(a_packed, a_scale, a_tensor_scale)
     b_bf16_q = dequant_2d_from_nvfp4(b_packed, b_scale, b_tensor_scale)
-    ref = torch.matmul(
-        a_bf16_q.float() * a_tensor_scale,
-        (b_bf16_q.float() * b_tensor_scale).T,
-    ).to(torch.bfloat16)
+    ref = torch.matmul(a_bf16_q.float(), b_bf16_q.float().T).to(torch.bfloat16)
 
     return a_packed, b_packed, a_scale, b_scale, a_tensor_scale, b_tensor_scale, ref
 

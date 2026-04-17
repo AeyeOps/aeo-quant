@@ -101,7 +101,11 @@ def _nvfp4_matmul_kernel(
 
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
-    for k_block in tl.range(0, tl.cdiv(K, BLOCK_K), num_stages=NUM_STAGES):
+    # No K-masking: the launcher requires K % BLOCK_K == 0.  No M/N
+    # masking either: the launcher pads M and N to multiples of
+    # BLOCK_M / BLOCK_N and slices the output after.  This keeps the
+    # inner loop free of int→fp8 casts that Triton can't handle.
+    for k_block in tl.range(0, K // BLOCK_K, num_stages=NUM_STAGES):
         k_packed_start = k_block * (BLOCK_K // ELEM_PER_BYTE)
         k_scale_start = k_block * (BLOCK_K // VEC_SIZE)
 
@@ -118,18 +122,12 @@ def _nvfp4_matmul_kernel(
                         + offs_n[:, None] * stride_bn_scale
                         + (k_scale_start + offs_k_scale_base)[None, :] * stride_bk_scale)
 
-        mask_m = offs_m[:, None] < M
-        mask_n = offs_n[:, None] < N
-        # Packed K bound relative to K // ELEM_PER_BYTE
-        k_packed_mask = (k_packed_start + offs_k_packed_base)[None, :] < (K // ELEM_PER_BYTE)
-        k_scale_mask = (k_scale_start + offs_k_scale_base)[None, :] < (K // VEC_SIZE)
-
-        a_raw = tl.load(a_ptrs, mask=mask_m & k_packed_mask, other=0)
-        b_raw = tl.load(b_ptrs, mask=mask_n & k_packed_mask, other=0)
+        a_raw = tl.load(a_ptrs)
+        b_raw = tl.load(b_ptrs)
         a = _swap_nibbles(a_raw)
         b = _swap_nibbles(b_raw)
-        a_scale = tl.load(a_scale_ptrs, mask=mask_m & k_scale_mask, other=0)
-        b_scale = tl.load(b_scale_ptrs, mask=mask_n & k_scale_mask, other=0)
+        a_scale = tl.load(a_scale_ptrs)
+        b_scale = tl.load(b_scale_ptrs)
 
         acc = tl.dot_scaled(a, a_scale, "e2m1", b.T, b_scale, "e2m1", acc)
 
@@ -229,27 +227,69 @@ def nvfp4_linear(
     else:
         BLOCK_M = 128
     BLOCK_N = 128
-    BLOCK_K = 128
+    # BLOCK_K=64 divides the Gemma 4 K=2880 hidden dim cleanly (45 iters).
+    # The native m16n8k64 MMA consumes K=64 per op, so one MMA per iter.
+    BLOCK_K = 64
     NUM_STAGES = 2
 
-    grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N),)
+    # Pad M to a multiple of BLOCK_M if needed.  N and K must be
+    # divisible — raise if they aren't (handling that in the kernel
+    # requires masked loads that Triton can't cast through fp8 type).
+    if N % BLOCK_N != 0:
+        raise ValueError(
+            f"N={N} must be divisible by BLOCK_N={BLOCK_N}. "
+            f"Add padding upstream if needed."
+        )
+    if K % BLOCK_K != 0:
+        raise ValueError(
+            f"K={K} must be divisible by BLOCK_K={BLOCK_K}. "
+            f"Add padding upstream if needed."
+        )
+
+    M_padded = ((M + BLOCK_M - 1) // BLOCK_M) * BLOCK_M
+    if M_padded != M:
+        # Pad the activation + its quantized form to M_padded rows.
+        a_packed_padded = torch.zeros(
+            M_padded, a_packed.shape[1],
+            dtype=a_packed.dtype, device=a_packed.device,
+        )
+        a_packed_padded[:M] = a_packed
+        a_block_scale_padded = torch.zeros(
+            M_padded, a_block_scale.shape[1],
+            dtype=a_block_scale.dtype, device=a_block_scale.device,
+        )
+        a_block_scale_padded[:M] = a_block_scale
+        a_packed = a_packed_padded
+        a_block_scale = a_block_scale_padded
+        c_padded = torch.empty(
+            (M_padded, N), dtype=out_dtype, device=x_bf16.device,
+        )
+    else:
+        c_padded = c
+
+    grid = (triton.cdiv(M_padded, BLOCK_M) * triton.cdiv(N, BLOCK_N),)
 
     _nvfp4_matmul_kernel[grid](
         a_packed, w_packed,
         a_block_scale, w_block_scale,
-        c,
+        c_padded,
         alpha,
-        M, N, K,
+        M_padded, N, K,
         a_packed.stride(0), a_packed.stride(1),
         w_packed.stride(0), w_packed.stride(1),
         a_block_scale.stride(0), a_block_scale.stride(1),
         w_block_scale.stride(0), w_block_scale.stride(1),
-        c.stride(0), c.stride(1),
+        c_padded.stride(0), c_padded.stride(1),
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
         VEC_SIZE=NVFP4_BLOCK_SIZE,
         ELEM_PER_BYTE=2,
         NUM_STAGES=NUM_STAGES,
     )
+
+    if M_padded != M:
+        c = c_padded[:M]
+    else:
+        c = c_padded
 
     if out_dtype == torch.float32:
         c = c.float()

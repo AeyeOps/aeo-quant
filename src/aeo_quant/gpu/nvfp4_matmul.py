@@ -43,6 +43,19 @@ import triton.language as tl
 
 
 @triton.jit
+def _swap_nibbles(x):
+    """Our NVFP4 checkpoint packs (k0 → high, k1 → low) per byte, but
+    Triton's ``tl.dot_scaled`` (and NVIDIA's FP4 MMA hardware) expects
+    the opposite: (k0 → low, k1 → high).  Three-op fix: mask, shift,
+    OR.  Negligible vs the MMA.
+
+    See ``kb/nvfp4-blackwell-research.md`` and the offline validation
+    in ``examples/test_nvfp4_kernel.py`` for the full story.
+    """
+    return ((x & 0xF) << 4) | ((x >> 4) & 0xF)
+
+
+@triton.jit
 def _nvfp4_matmul_kernel(
     a_ptr, b_ptr,
     a_scale_ptr, b_scale_ptr,
@@ -71,6 +84,9 @@ def _nvfp4_matmul_kernel(
     Shapes as the kernel sees them post-fp4x2-expansion (handled by
     `tl.dot_scaled`): a is (BLOCK_M, BLOCK_K) e2m1, b is (BLOCK_N,
     BLOCK_K) e2m1, but stored as (BLOCK_M/N, BLOCK_K // 2) uint8.
+
+    Both a and b are nibble-swapped after load to match Triton's
+    (low=k0, high=k1) packing convention.
     """
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_M)
@@ -108,8 +124,10 @@ def _nvfp4_matmul_kernel(
         k_packed_mask = (k_packed_start + offs_k_packed_base)[None, :] < (K // ELEM_PER_BYTE)
         k_scale_mask = (k_scale_start + offs_k_scale_base)[None, :] < (K // VEC_SIZE)
 
-        a = tl.load(a_ptrs, mask=mask_m & k_packed_mask, other=0)
-        b = tl.load(b_ptrs, mask=mask_n & k_packed_mask, other=0)
+        a_raw = tl.load(a_ptrs, mask=mask_m & k_packed_mask, other=0)
+        b_raw = tl.load(b_ptrs, mask=mask_n & k_packed_mask, other=0)
+        a = _swap_nibbles(a_raw)
+        b = _swap_nibbles(b_raw)
         a_scale = tl.load(a_scale_ptrs, mask=mask_m & k_scale_mask, other=0)
         b_scale = tl.load(b_scale_ptrs, mask=mask_n & k_scale_mask, other=0)
 

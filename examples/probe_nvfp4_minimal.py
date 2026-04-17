@@ -81,8 +81,12 @@ def _build_kernel():
         b_scale_ptrs = (b_scale_ptr + offs_n[:, None] * stride_bn_scale
                         + offs_k_scale[None, :] * stride_bk_scale)
 
-        a = tl.load(a_ptrs)                # (BLOCK_M, BLOCK_K // 2) uint8
-        b = tl.load(b_ptrs)                # (BLOCK_N, BLOCK_K // 2) uint8
+        a_raw = tl.load(a_ptrs)            # (BLOCK_M, BLOCK_K // 2) uint8
+        b_raw = tl.load(b_ptrs)            # (BLOCK_N, BLOCK_K // 2) uint8
+        # Our checkpoint pack: (k0 high, k1 low). Triton/NV expects the
+        # opposite (k0 low, k1 high). 3-op swap, negligible vs MMA.
+        a = ((a_raw & 0xF) << 4) | ((a_raw >> 4) & 0xF)
+        b = ((b_raw & 0xF) << 4) | ((b_raw >> 4) & 0xF)
         a_scale = tl.load(a_scale_ptrs)    # (BLOCK_M, BLOCK_K // 16) fp8
         b_scale = tl.load(b_scale_ptrs)    # (BLOCK_N, BLOCK_K // 16) fp8
 

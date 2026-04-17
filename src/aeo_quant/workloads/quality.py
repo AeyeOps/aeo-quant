@@ -17,7 +17,7 @@ from collections.abc import Callable
 from typing import Any
 
 import torch
-from turboquant import TurboQuantCache
+from aeo_quant.bridges.gemma4.cache import Gemma4HybridTurboQuantCache
 
 DEFAULT_QUALITY_SUITE: list[list[str]] = [
     [
@@ -75,7 +75,7 @@ def run(
         inputs = tokenizer(prompt_str, return_tensors="pt").to(model.device)
         n_prompt = int(inputs["input_ids"].shape[-1])
 
-        cache = TurboQuantCache(bits=kv_bits)
+        cache = Gemma4HybridTurboQuantCache(bits=kv_bits, config=model.config)
         t = time.time()
         with torch.inference_mode():
             outputs = model.generate(

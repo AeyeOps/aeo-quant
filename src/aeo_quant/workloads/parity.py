@@ -13,7 +13,7 @@ from collections.abc import Callable
 from typing import Any
 
 import torch
-from turboquant import TurboQuantCache
+from aeo_quant.bridges.gemma4.cache import Gemma4HybridTurboQuantCache
 
 DEFAULT_PROMPT = (
     "You are a senior Python engineer.\n\n"
@@ -65,7 +65,7 @@ def run(
     inputs = tokenizer(prompt_str, return_tensors="pt").to(model.device)
     n_prompt = inputs["input_ids"].shape[-1]
 
-    cache = TurboQuantCache(bits=kv_bits)
+    cache = Gemma4HybridTurboQuantCache(bits=kv_bits, config=model.config)
 
     torch.manual_seed(0)
     t = time.time()

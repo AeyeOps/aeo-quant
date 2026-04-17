@@ -2,6 +2,48 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.10] - 2026-04-17
+
+### Added
+
+- **`Gemma4HybridTurboQuantCache`** in `aeo_quant.bridges.gemma4.cache` — a
+  SWA-aware KV cache that pre-populates `self.layers` with per-layer backends
+  based on `config.layer_types` and `config.sliding_window`.
+  - `TurboQuantSlidingLayer(TurboQuantLayer)` caps compressed storage at
+    `sliding_window − 1 − residual_len` tokens (895 with defaults) by trimming
+    the head of `_key_indices`/`_key_norms`/`_value_indices`/`_value_norms`
+    after the parent's `update` runs. The return tensors are untouched so the
+    current step's attention mask shape still matches — trimming only shrinks
+    storage for the *next* update.
+  - `get_mask_sizes(query_length)` on sliding layers mirrors the formula from
+    transformers' `DynamicSlidingWindowLayer` verbatim, so
+    `transformers.masking_utils` builds the correct sliding-window mask.
+  - Full-attention layers (5 of 30 on Gemma 4) stay as vanilla
+    `TurboQuantLayer` — unbounded growth is correct for them.
+  - Validates `num_kv_shared_layers == 0` and raises `NotImplementedError` on
+    unknown `layer_type` values so the next model variant fails loud.
+- **`examples/parity_long_check.py`** — 2000-token greedy parity gate. The
+  50-token `parity_check.py` never crosses the 1024-token sliding window;
+  `parity_long_check.py` does, so any SWA-eviction bug surfaces here.
+  First run establishes `tests/fixtures/parity_long_baseline_{fp8,nvfp4}.txt`;
+  subsequent runs fail if token-level divergence > 0.5%.
+
+### Changed
+
+- **All four workload modules** (`parity`, `reasoning`, `quality`,
+  `multi_turn`) now construct `Gemma4HybridTurboQuantCache(bits=kv_bits,
+  config=model.config)` instead of `TurboQuantCache(bits=kv_bits)`. No API
+  change visible to callers; existing workload kwargs are preserved.
+
+### Performance (expected, post-validation)
+
+At 16K context, ~80% of the per-step dequant workload on the stock cache is
+on sliding-layer history older than the 1024-token window — data the attention
+kernel then masks out. `Gemma4HybridTurboQuantCache` eliminates that wasted
+work. Cost-model estimates: **2–3× decode tok/s at 16K, 3–5× at 32K**. These
+are predictions; measured numbers will be recorded here after the comparator
+runs (see `docs/plans/bubbly-humming-deer.md` for the verification protocol).
+
 ## [0.1.9] - 2026-04-17
 
 ### Added

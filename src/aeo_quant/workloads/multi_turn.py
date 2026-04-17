@@ -43,7 +43,7 @@ from typing import Any
 
 import psutil
 import torch
-from turboquant import TurboQuantCache
+from aeo_quant.bridges.gemma4.cache import Gemma4HybridTurboQuantCache
 
 from aeo_quant.bridges.gemma4.parser import GEMMA4_PARSER
 from aeo_quant.bridges.gemma4.streamer import HarnessStreamer
@@ -131,7 +131,7 @@ def run(
     }
 
     # KV cache persists across turns
-    cache = TurboQuantCache(bits=kv_bits)
+    cache = Gemma4HybridTurboQuantCache(bits=kv_bits, config=model.config)
     cache_seq_len = 0
 
     try:

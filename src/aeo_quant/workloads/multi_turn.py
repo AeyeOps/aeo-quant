@@ -35,6 +35,7 @@ Events:
 from __future__ import annotations
 
 import gc
+import json
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -96,8 +97,26 @@ def run(
     metrics_path = out_path / f"run_{target}.jsonl"
     transcript_path = out_path / f"transcript_{target}.jsonl"
     memtrail_path = out_path / f"memtrail_{target}.csv"
+    events_path = out_path / f"events_{target}.jsonl"
     if metrics_path.exists():
         metrics_path.unlink()
+
+    # Tee every emitted event to disk at the moment of emission. No event
+    # type is filtered — thinking_text, answer_chunk, turn_start, turn_complete,
+    # memory_warning, and anything added later all land here as NDJSON.
+    # Line-buffered so a crash mid-turn still has everything the user saw
+    # scroll by on the terminal. This is additive to run_<target>.jsonl and
+    # transcript_<target>.jsonl, which stay as turn-close summaries.
+    # Persistence failures propagate — if we can't save model output, that's
+    # a loud problem, not a quiet one.
+    _events_fh = events_path.open("a", buffering=1)
+    _upstream_emit = emit
+
+    def _tee_emit(event: dict) -> None:
+        _events_fh.write(json.dumps(event, default=str) + "\n")
+        _upstream_emit(event)
+
+    emit = _tee_emit
 
     fill_threshold = int(target * 0.80)
 
@@ -413,8 +432,10 @@ def run(
         gc.collect()
         transcript.close()
         memtrail.close()
+        _events_fh.close()
 
     run_summary["metrics_path"] = str(metrics_path)
     run_summary["transcript_path"] = str(transcript_path)
     run_summary["memtrail_path"] = str(memtrail_path)
+    run_summary["events_path"] = str(events_path)
     return run_summary

@@ -216,8 +216,16 @@ def nvfp4_linear(
 
     c = torch.empty((M, N), dtype=out_dtype, device=x_bf16.device)
 
-    # Tile selection.  Decode path (M small) uses a narrow BLOCK_M so we
-    # don't waste tensor-core lanes on zero-padded rows.
+    # Tile selection.  Decode path (M small) lowers BLOCK_M so we don't
+    # waste tensor-core lanes on zero-padded rows.
+    #
+    # Tuning notes (examples/tune_nvfp4_kernel.py):
+    # - NUM_STAGES=3 + num_warps=4 hits 74 TFLOPS at M=1024, K=2816, N=1408
+    # - But at M=2880, N=5760 (many programs × 990 ~ SMs), NUM_STAGES=3
+    #   hurts due to occupancy.  Keep 2 as the safe default; the kernel
+    #   stays fast for small shapes even without the extra stage.
+    # - Larger prefill shapes benefit from autotune per-shape; defer
+    #   until we have more workload data.
     if M <= 16:
         BLOCK_M = 16
     elif M <= 32:
@@ -227,10 +235,11 @@ def nvfp4_linear(
     else:
         BLOCK_M = 128
     BLOCK_N = 128
-    # BLOCK_K=64 divides the Gemma 4 K=2880 hidden dim cleanly (45 iters).
-    # The native m16n8k64 MMA consumes K=64 per op, so one MMA per iter.
-    BLOCK_K = 64
+    # Prefer BLOCK_K=128 when it divides K (max throughput); fall back to
+    # 64 otherwise.  Native MMA K=64 so either maps cleanly.
+    BLOCK_K = 128 if K % 128 == 0 else 64
     NUM_STAGES = 2
+    NUM_WARPS = 4
 
     # Pad M to a multiple of BLOCK_M if needed.  N and K must be
     # divisible — raise if they aren't (handling that in the kernel
@@ -284,6 +293,7 @@ def nvfp4_linear(
         VEC_SIZE=NVFP4_BLOCK_SIZE,
         ELEM_PER_BYTE=2,
         NUM_STAGES=NUM_STAGES,
+        num_warps=NUM_WARPS,
     )
 
     if M_padded != M:

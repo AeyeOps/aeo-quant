@@ -1,26 +1,19 @@
 #!/usr/bin/env python3
-"""Inspect logits at the parity-divergence token position.
+"""Inspect logits at a chosen generation step to diagnose near-ties.
 
-Parity check showed 3D decode path diverges from the per-expert baseline
-at token position 40: baseline picks 236761, 3D picks 568. Everything
-after cascades (different conditioning). This script captures the
-top-K logits at that exact position to tell whether the flip is a
-near-tie (cliff effect — benign) or a substantive numerical shift.
+Runs ``generate()`` with ``output_scores=True`` and dumps the top-K
+logits at one target step, so a parity-divergence between two forward
+paths can be attributed to a true arithmetic shift versus a
+cliff-effect near-tie (two close tokens swap ranks under tiny
+perturbation).
 
-Approach: run generate() with output_scores=True for 41 new tokens, then
-look at scores[40] — the distribution the model would sample from at
-the divergence position. Token 40 is conditioned on the matched
-prefix (tokens 0..39), which are identical between 3D-on and 3D-off,
-so both runs see the same input sequence at step 40. If the argmax
-differs, that's entirely due to expert-forward numerics.
+Usage::
 
-Usage (run TWICE — once per path):
+    TRITON_OVERRIDE_ARCH=sm120 AEO_NVFP4_NATIVE=1 QUANT_FORMAT=nvfp4 \\
+        uv run python examples/probe_logits_at_divergence.py
 
-  AEO_NVFP4_3D_DECODE=0 ... uv run python examples/probe_logits_at_divergence.py > /tmp/logits_3d_off.txt
-  AEO_NVFP4_3D_DECODE=1 ... uv run python examples/probe_logits_at_divergence.py > /tmp/logits_3d_on.txt
-
-The env var is read at module import of modeling_nvfp4, so it must be
-set BEFORE the import. This script enforces it.
+Prints the top-10 tokens with logits and softmax probabilities at a
+fixed step (default: index 40, matches the Phase 6 divergence).
 """
 from __future__ import annotations
 
@@ -40,7 +33,6 @@ QUANT_FORMAT, CHECKPOINT, KV_BITS = quant_env()
 preflight_memory(20, label="probe_logits")
 
 print(f"[probe] QUANT_FORMAT={QUANT_FORMAT}")
-print(f"[probe] AEO_NVFP4_3D_DECODE={os.environ.get('AEO_NVFP4_3D_DECODE', '(default=1)')}")
 print(f"[probe] AEO_NVFP4_NATIVE={os.environ.get('AEO_NVFP4_NATIVE', '(unset)')}")
 
 from aeo_quant.bridges.gemma4.cache import Gemma4HybridTurboQuantCache

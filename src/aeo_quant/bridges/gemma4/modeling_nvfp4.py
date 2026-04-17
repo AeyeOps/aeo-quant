@@ -39,7 +39,6 @@ from aeo_quant.gpu.quant import NVFP4_BLOCK_SIZE
 
 
 _MOE_TRACE = os.environ.get("AEO_MOE_TRACE") == "1"
-_DECODE_3D_ENABLED = os.environ.get("AEO_NVFP4_3D_DECODE", "1") == "1"
 
 
 def _moe_range(name: str):
@@ -110,13 +109,14 @@ class Gemma4TextExpertsNVFP4(Gemma4TextExperts):
     def forward(self, hidden_states, top_k_index, top_k_weights):
         """Native NVFP4 expert forward.
 
-        Dispatches to a decode-fast 3D-batched path at M=1 (single
-        token), or to the per-expert 2D loop at prefill. Both paths are
-        functionally equivalent; the 3D path reduces launch count by k×
-        (one kernel per projection instead of one per expert per
-        projection).
+        Shape-regime dispatch: M=1 (decode) runs through the 3D
+        batched kernel; M>1 (prefill) stays on the per-expert 2D loop.
+        Both paths are functionally equivalent and produce bit-exact
+        output; the 3D path trades k per-expert launches for one
+        fused launch per projection at decode shapes where launch
+        overhead dominates.
         """
-        if _DECODE_3D_ENABLED and hidden_states.shape[0] == 1:
+        if hidden_states.shape[0] == 1:
             return self._forward_decode_3d(
                 hidden_states, top_k_index, top_k_weights,
             )

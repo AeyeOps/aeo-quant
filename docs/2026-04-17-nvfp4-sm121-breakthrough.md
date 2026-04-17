@@ -51,16 +51,29 @@ kernel_out_norm: 14.5365
 ref_norm:        14.5490
 ```
 
-Gemma 4 expert dims (K=2880, N=5760) — synthetic weights:
+Gemma 4 expert dims (K=2880, N=5760) — synthetic weights, quiet GPU:
 
 | M (tokens) | Time   | TFLOPS | Comment                    |
 |-----------:|-------:|-------:|----------------------------|
-|          1 | 0.39ms |   0.08 | launch-bound decode        |
-|          8 | 0.29ms |   0.91 | prefix decode              |
-|         64 | 0.51ms |   4.20 |                            |
-|        128 | 0.46ms |   9.33 |                            |
-|        512 | 0.64ms |  26.72 | prefill saturating         |
-|       2880 | 4.09ms |  23.36 | full prefill               |
+|          1 | 0.28ms |   0.12 | launch-bound decode        |
+|          8 | 0.20ms |   1.33 | prefix decode              |
+|         64 | 0.26ms |   8.22 |                            |
+|        128 | 0.28ms |  15.35 |                            |
+|        512 | 0.63ms |  26.83 | prefill saturating         |
+|       2880 | 4.54ms |  21.04 | full prefill               |
+
+Tight-loop single-shape burst (M=1024, K=2816, N=1408, tuner with
+BLOCK_M=128/BLOCK_N=128/BLOCK_K=128/NUM_STAGES=3/num_warps=4):
+
+```
+112.42 TFLOPS on quiet GPU
+9-25 TFLOPS under contention (shared-box with vLLM + harness daemon)
+```
+
+The 112 peak means the kernel is reaching **~22% of GB10's ~500
+TFLOPS FP4 peak** even without TMA or swizzled scales.  Not bad for
+a first cut.  Head-room is the usual kernel tuning suspects; the
+hardware path is proven.
 
 Real Gemma 4 26B-A4B NVFP4 checkpoint (expert 0, layer 0):
 

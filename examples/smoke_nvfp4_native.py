@@ -82,30 +82,47 @@ def main() -> int:
     mem_report("after_load")
 
     model.eval()
-    prompt = "Hello world"
+    prompt = os.environ.get(
+        "SMOKE_PROMPT",
+        "The capital of France is",
+    )
     inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
     print(f"\n--- generating 1 token from prompt {prompt!r} ({inputs['input_ids'].shape[1]} tokens input) ---")
 
+    # Warmup: one token to trigger compile + warm caches
     t0 = time.monotonic()
     try:
         with torch.no_grad():
             out = model.generate(**inputs, max_new_tokens=1, do_sample=False)
     except Exception as e:
-        print(f"[FATAL] generate: {type(e).__name__}: {e}", file=sys.stderr)
+        print(f"[FATAL] warmup generate: {type(e).__name__}: {e}", file=sys.stderr)
         import traceback; traceback.print_exc()
         return 1
     torch.cuda.synchronize()
+    warmup_ms = (time.monotonic() - t0) * 1000
+    print(f"[warmup] {warmup_ms:.1f}ms for 1 token (compile + prefill)")
+
+    # Steady-state: generate N tokens, measure tok/s
+    n_tokens = int(os.environ.get("GEN_TOKENS", "50"))
+    print(f"\n--- generating {n_tokens} tokens ({prompt!r}) ---")
+    t0 = time.monotonic()
+    with torch.no_grad():
+        out = model.generate(**inputs, max_new_tokens=n_tokens, do_sample=False)
+    torch.cuda.synchronize()
     elapsed = time.monotonic() - t0
+    new_tokens = out.shape[1] - inputs["input_ids"].shape[1]
+    tok_per_s = new_tokens / elapsed
     decoded = tokenizer.decode(out[0], skip_special_tokens=False)
 
-    print(f"[generate] {elapsed * 1000:.1f}ms")
+    print(f"\n[generate] {elapsed:.2f}s for {new_tokens} tokens")
+    print(f"[tok/s] {tok_per_s:.2f}")
     print(f"\n[OUTPUT]: {decoded!r}")
     mem_report("after_generate")
 
     if out.shape[1] > inputs["input_ids"].shape[1]:
-        print("\n[PASS] one token generated via native NVFP4 path")
+        print(f"\n[PASS] {new_tokens} tokens generated via native NVFP4 path at {tok_per_s:.2f} tok/s")
         return 0
-    print("\n[FAIL] no new token produced")
+    print("\n[FAIL] no new tokens produced")
     return 1
 
 

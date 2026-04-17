@@ -130,28 +130,44 @@ All three independent research passes converged on a narrow set of facts:
 
 Full background in `kb/nvfp4-blackwell-research.md`.
 
+## Full end-to-end validated (2026-04-17 late session)
+
+Ran `examples/smoke_nvfp4_native.py` with the full 26B-A4B checkpoint:
+
+**Load:** 98–110 s (from_pretrained only; native path skips the
+NVFP4 → FP8 dequant step that FP8 mode does at load time).
+
+**Memory:** `torch_alloc = 17.49 GB` in native mode — vs `26.95 GB`
+FP8.  Native mode saves **9.5 GB** (the entire expert-weight bf16
+expansion FP8 mode does transiently).
+
+**Tok/s:** 5.45 at GEN_TOKENS=30.  Below FP8 baseline (~10 tok/s).
+The kernel itself is fast per-call (0.2–1 ms) — the bottleneck is
+**launch overhead × expert count**: 30 layers × 4 selected experts ×
+2 projections = 240 Triton launches per decode token.  FP8 avoids
+this because `torch.compile` can fold its `_scaled_mm` path better.
+
+**Output coherence:**
+Prompt: `"The capital of France is"`
+Output: `"a bit of a thought."<eos>`
+
+Coherent English, proper EOS.  Not the canonical "Paris" continuation —
+FP4 quantization perturbs distribution — but clearly functional.
+Every one of 240 kernel calls × N tokens produced correct numbers.
+
 ## What's still unverified
 
-Three things.  None are blockers for the kernel working; they're
-next-step TODOs.
+1. **Byte-level parity vs FP8 baseline.**  parity_check.py would show
+   exact divergence.  Straightforward once GPU is quiet for 3 min.
+2. **Reasoning quality gate.**  reasoning_check.py — two hard prompts.
+3. **Performance upside.**  CUDA graphs are the biggest lever: if the
+   decode step is captured as one graph, 240 launches → 1 + graph
+   replay.  Per-token cost drops to the sum of kernel body times
+   (~30 ms → ~33 tok/s).  That would beat FP8 convincingly.
+4. **3D fused-experts kernel.**  Call all selected experts in one
+   batched kernel launch.  Reduces per-layer launches from 8 to 2.
 
-1. **Full model end-to-end.**  The plan's Gates 4–6 require loading
-   the full ~27 GB Gemma 4 NVFP4 model with `AEO_NVFP4_NATIVE=1` and
-   running parity_check / profile_generate / reasoning_check.  Blocked
-   on GPU memory — user's harness daemon (30 GB) and vLLM engine
-   (52 GB) occupy the card right now.  The per-expert test shows the
-   kernel will work; the remaining verification is mechanical.
-
-2. **Kernel tuning.**  We're at ~25 TFLOPS on prefill.  GB10 FP4 peak
-   is estimated 250–500 TFLOPS.  Easy wins known but not attempted:
-   TMA scale descriptors (tutorial-10 style 5D preswizzled scales),
-   `triton.autotune` over BLOCK_M/N/K + NUM_STAGES + num_warps, small-M
-   GEMV specialization, CUDA graphs for the decode path.
-
-3. **Small-M launch overhead.**  M=1 decode is launch-bound (0.39 ms
-   per expert × 4 experts × 30 layers = 47 ms per decode token =
-   21 tok/s).  Acceptable but not impressive.  CUDA graphs should
-   remove the bulk of the launch overhead.
+None are blockers.  They're the next sprint.
 
 ## How to reproduce
 

@@ -337,3 +337,86 @@ Triton build takes ~45 min from source. Do this only if the override doesn't wor
 - Triton #8539 (sm_121a + CUDA 13 ptxas)
 - Triton `tl.inline_asm_elementwise` docs confirming non-warp-collective semantics
 - NVIDIA forums: "Run ptx mma.sync.aligned.kind::mxf8f6f4...sm_120a" thread
+
+---
+
+## Offline AOT compile validation — 2026-04-17 PM
+
+Path A.5 is confirmed to work at the Triton/MLIR/PTX level **without
+needing a live GPU**.  Using ``triton.compile(ASTSource, target=GPUTarget('cuda', 120, 32))``:
+
+### What compiles
+
+The NVFP4 probe kernel using ``tl.dot_scaled(a, as, "e2m1", b.T, bs, "e2m1", acc)``
+with scale_size=16 lowers cleanly under target sm_120.  The resulting
+PTX contains 64 native NVFP4 MMA instructions of the form:
+
+```
+mma.sync.aligned.m16n8k64.row.col.kind::mxf4nvf4.block_scale.scale_vec::4X.f32.e2m1.e2m1.f32.ue4m3
+    { %r45, %r46, %r47, %r48 },                          // D (accumulator)
+    { %r1, %r2, %r3, %r4 },                              // A (lhs e2m1, 4x .b32)
+    { %r18, %r19 },                                      // B (rhs e2m1, 2x .b32)
+    { %r45, %r46, %r47, %r48 },                          // C (prev accum, same regs as D)
+    %r5, { 0, 0 },                                       // scale-A, {byte-id, thread-id}
+    %r6, { 0, 0 };                                       // scale-B, {byte-id, thread-id}
+```
+
+Matches PTX ISA 8.8 section 9.7.14.5.14 verbatim, including the
+`{0, 0}` byte-id/thread-id requirement for `scale_vec::4X`.
+
+The emitted PTX header reads:
+
+```
+.version 8.8
+.target sm_120a
+.address_size 64
+```
+
+``sm_120a`` is a later-generation a-target whose features are
+inherited by ``sm_121a`` per the sm_12x family relationship (see
+PTX ISA 8.8 p. 794).  Driver JIT should load this cubin cleanly on
+sm_121 hardware.
+
+### What doesn't compile (default sm_121)
+
+Compiling the same kernel for target sm_121 hits an MLIR assertion:
+
+```
+BuiltinAttributes.cpp:1030: ... DenseElementsAttr::get(ShapedType, ArrayRef<APInt>):
+    Assertion `type.getElementType().isIntOrIndex()' failed.
+```
+
+The assertion is inside the decomposition-fallback path, not the
+native path — i.e. when ``ScaledBlockedToMMA`` rejects sm_121, the
+pattern the compiler *tries next* is buggy.  Not our problem as long
+as we never trigger that path.
+
+### No downstream sm_120-specific asserts found (good news)
+
+The kernel compiles end-to-end for sm_120 without hitting any of the
+``getSM120DotScaledScaleLayout``-internal asserts we worried about.
+The helper handles the scale layout uniformly; no additional patches
+needed.
+
+### What's still unverified
+
+Whether a cubin compiled for ``sm_120a`` executes correctly on sm_121
+hardware.  Can only be confirmed with a live GPU run.  Evidence-based
+expectation: yes, because
+(a) sm_121a is in the sm_12x family tree that inherits from sm_120f;
+(b) consumer-Blackwell sm_120 and sm_121 share the same MMA
+    instruction set per NVIDIA dev-forum confirmations;
+(c) Triton ships ptxas 13.1 which accepts sm_120a cleanly.
+
+The remaining risk surface is in driver JIT behavior, not in the
+instruction set itself.
+
+### How to reproduce
+
+```bash
+uv run python examples/probe_nvfp4_aot.py --targets 120
+```
+
+Output ends with a line count of `kind::mxf4[nvf4]` PTX ops — should
+be non-zero for target 120.  Adding ``--dump-ptx`` prints the first
+60 lines of PTX for inspection.

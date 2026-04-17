@@ -34,7 +34,7 @@ cleanly on the driver, and runs.
 |---|---|
 | `src/aeo_quant/gpu/nvfp4_matmul.py` | `nvfp4_linear(x_bf16, w_packed, w_scale, w_tensor_scale)` — one expert's matmul via a Triton `tl.dot_scaled` kernel |
 | `src/aeo_quant/bridges/gemma4/modeling_nvfp4.py` | `Gemma4TextExpertsNVFP4.forward()` — per-expert loop calling the kernel |
-| `src/aeo_quant/bridges/gemma4/loader.py` | Loader honors `AEO_NVFP4_NATIVE=1`; keeps FP4 in GPU memory instead of converting to FP8 |
+| `src/aeo_quant/bridges/gemma4/loader.py` | `load_gemma4_nvfp4` — loads packed FP4 weights, wraps with `torch.compile` |
 | `src/aeo_quant/gpu/kernel_probe.py` | Subprocess-isolated safety harness with timeout + GPU snapshots |
 | `examples/probe_nvfp4_aot.py` | Offline AOT compile probe — proves Path A.5 at the PTX level without needing GPU |
 | `examples/probe_nvfp4_minimal.py` | Live 128×128×128 correctness probe |
@@ -189,9 +189,9 @@ tools/dump_triton_sass.sh --name _nvfp4_matmul --limit 5000 \
     | grep "OMMA.SF.16864.F32.E2M1.E2M1.UE4M3.4X" | head
 
 # 6. (When GPU memory frees) Full-model path:
-TRITON_OVERRIDE_ARCH=sm120 AEO_NVFP4_NATIVE=1 \
+TRITON_OVERRIDE_ARCH=sm120 QUANT_FORMAT=nvfp4 \
     uv run python examples/parity_check.py
-TRITON_OVERRIDE_ARCH=sm120 AEO_NVFP4_NATIVE=1 \
+TRITON_OVERRIDE_ARCH=sm120 QUANT_FORMAT=nvfp4 \
     uv run python examples/profile_generate.py
 ```
 

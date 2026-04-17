@@ -1,29 +1,26 @@
-"""Gemma4TextExpertsNVFP4: native-NVFP4 expert path for Gemma 4 MoE.
+"""Gemma4TextExpertsNVFP4: NVFP4 expert path for Gemma 4 MoE.
 
 Two roles:
 
 1. **Load-time buffer holder.** Subclasses ``Gemma4TextExperts`` so the
    ``isinstance`` check in ``Gemma4PreTrainedModel._init_weights`` still
-   matches.  All NVFP4 tensors are registered as persistent buffers
+   matches. All NVFP4 tensors are registered as persistent buffers
    (not Parameters) because uint8 packed weights are non-float and
    incompatible with ``nn.Parameter``.
 
-2. **Inference path when ``AEO_NVFP4_NATIVE=1``.**  ``forward()`` routes
-   each selected expert through :func:`aeo_quant.gpu.nvfp4_matmul.nvfp4_linear`,
-   keeping FP4 weights in GPU memory (no dequant-to-FP8 round trip).
+2. **Inference forward.** ``forward()`` dispatches on
+   ``hidden_states.shape[0]``: M=1 decode routes through the 3D batched
+   NVFP4 kernel (``nvfp4_linear_3d_prequantized``); M>1 prefill routes
+   through the per-expert 2D loop (``nvfp4_linear_prequantized``). Both
+   keep FP4 weights packed on GPU — no dequant round trip.
 
-When ``AEO_NVFP4_NATIVE`` is unset or 0, the loader converts NVFP4
-buffers to FP8 Parameters after ``from_pretrained`` and swaps
-``__class__`` to ``Gemma4TextExpertsFP8`` — ``forward()`` here is
-never called in that case.
-
-Critical env var for GB10 (sm_121)::
+Required env var for GB10 (sm_121)::
 
     TRITON_OVERRIDE_ARCH=sm120
 
 Without this, Triton's ``ScaledBlockedToMMA`` MLIR pattern hard-rejects
 the compute capability and ``tl.dot_scaled`` falls through to a slow
-decomposition.  See ``kb/nvfp4-blackwell-research.md`` "second deep dive".
+decomposition. See ``kb/nvfp4-blackwell-research.md`` "second deep dive".
 """
 from __future__ import annotations
 
@@ -48,14 +45,13 @@ def _moe_range(name: str):
 
 
 class Gemma4TextExpertsNVFP4(Gemma4TextExperts):
-    """Load-time container + native-NVFP4 forward for Gemma 4 experts.
+    """Load-time container + NVFP4 forward for Gemma 4 experts.
 
     Registers persistent buffers with the right shapes and dtypes so
     that ``from_pretrained`` can load the NVFP4 checkpoint tensors.
-    ``forward()`` runs the per-expert NVFP4 matmul through our Triton
-    kernel when this class is still installed at inference time —
-    i.e., when the loader was instructed (via ``AEO_NVFP4_NATIVE=1``)
-    to skip the convert-to-FP8 step.
+    ``forward()`` dispatches decode vs prefill on input shape; both
+    paths run the FP4 weights through our Triton ``tl.dot_scaled``
+    kernel with no dequantization round trip.
     """
 
     def __init__(self, config):

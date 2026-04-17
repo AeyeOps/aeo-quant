@@ -31,7 +31,7 @@ Native FP4 matmul on Blackwell (sm_121) is **broken** as of 2026-04-16:
 - `torch.float4_e2m1fn_x2`: dtype exists in torch 2.7+ but ops are CPU-only
 
 **Status:** Upstream issue, not fixable by us. When fixed, upgrade is localized
-to the loader (swap `_convert_nvfp4_experts_to_fp8` for direct FP4 matmul).
+to the loader (direct FP4 matmul path).
 
 ## Dequant-to-FP8 Strategy
 
@@ -499,7 +499,7 @@ runs in under 1 ms, and a decode step needs 4 experts active per
 layer × 30 layers × ~16 kernel launches = well under 10 ms for the
 MoE portion.  Closing the 10 → 30+ tok/s gap is feasible once we:
 
-1. Run full-model with AEO_NVFP4_NATIVE=1 (needs GPU memory freed)
+1. Run full-model through the NVFP4 kernel end-to-end
 2. Add TMA scale descriptors (tutorial-10 style)
 3. Autotune per-shape
 

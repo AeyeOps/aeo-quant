@@ -33,17 +33,17 @@ action the most optimal path to 52 tok/s?" Don't sunk-cost on diminishing return
 - **Branch:** `main`. Working tree clean (to be verified at session start).
 - **Latest commits:** `aa6c042` (tunable MIN_FREE_GB), `72fdffd` (pre-quantize dedup).
 - **Today's baseline:** 6.77 tok/s via `parity_check.py` + native harness.
-- **Native harness state:** may or may not still be running at session start.
+- **Harness state:** may or may not still be running at session start.
   Check with `uv run python -m aeo_quant.harness.cli status`. If running on nvfp4
   with uptime > 0, reuse it (saves ~100 s model load). If not running, start with:
   ```bash
-  TRITON_OVERRIDE_ARCH=sm120 AEO_NVFP4_NATIVE=1 QUANT_FORMAT=nvfp4 HARNESS_MIN_FREE_GB=20 \
+  TRITON_OVERRIDE_ARCH=sm120 QUANT_FORMAT=nvfp4 HARNESS_MIN_FREE_GB=20 \
     nohup uv run python -m aeo_quant.harness.cli start --format nvfp4 \
       > /tmp/aeo-harness.log 2>&1 &
   ```
-- **`.env` reverted** to the original 3 lines (HF_TOKEN + 2 checkpoints). Native env
-  vars live on the command line, not in .env. **Do not** put QUANT_FORMAT /
-  AEO_NVFP4_NATIVE / TRITON_OVERRIDE_ARCH in .env — the override behavior masks
+- **`.env` reverted** to the original 3 lines (HF_TOKEN + 2 checkpoints).
+  Runtime env vars live on the command line, not in .env. **Do not** put
+  QUANT_FORMAT / TRITON_OVERRIDE_ARCH in .env — the override behavior masks
   shell env and surprised us earlier.
 - **Fresh nvfp4 parity baseline** at `tests/fixtures/parity_baseline_nvfp4.txt`
   (established today, post-dedup). Gitignored — don't expect it in git. If the
@@ -403,7 +403,7 @@ is the durable plan — keep it updated with phase outcomes.
   correctness, see commit `72fdffd`.
 - `src/aeo_quant/bridges/gemma4/modeling_nvfp4.py` — `Gemma4TextExpertsNVFP4.forward`.
   Phase 5 rewrite target.
-- `src/aeo_quant/bridges/gemma4/loader.py` — `AEO_NVFP4_NATIVE=1` gate, `torch.compile`
+- `src/aeo_quant/bridges/gemma4/loader.py` — `load_gemma4_nvfp4`, `torch.compile`
   wrap. Don't touch during phases 0–6.
 - `src/aeo_quant/harness/server.py` — harness; `HARNESS_MIN_FREE_GB` env override.
 - `src/aeo_quant/workloads/parity.py` — uses `Gemma4HybridTurboQuantCache` (TurboQuant

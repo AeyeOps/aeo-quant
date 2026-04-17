@@ -32,11 +32,10 @@ import time
 import aeo_quant  # noqa: F401 — triggers np.trapz compat shim before numpy is used
 from aeo_quant.core.config import load_dotenv, quant_env, results_dir, setup_cuda_allocator
 from aeo_quant.core.viewer import generate_html
-from aeo_quant.gpu.memory import mem_report, preflight_memory
+from aeo_quant.gpu.memory import mem_report
 from aeo_quant.harness import HarnessUnavailable, get_or_start_harness
 from aeo_quant.plots.context_scaling import generate_dashboard
 
-MIN_FREE_GB = 60.0
 CONTEXT_TARGET = 16384
 
 load_dotenv()
@@ -173,13 +172,12 @@ def main() -> int:
         f"KV_BITS={KV_BITS} target={CONTEXT_TARGET:,} cap={VRAM_CAP_GB:.0f} GB",
         flush=True,
     )
-    preflight_memory(MIN_FREE_GB, label="multi_turn_16k")
     mem_report("multi_turn:start")
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     try:
-        client = get_or_start_harness()
+        client = get_or_start_harness(preflight_label="multi_turn_16k")
     except HarnessUnavailable as e:
         print(f"[FATAL] harness unavailable: {e}", file=sys.stderr)
         return 2

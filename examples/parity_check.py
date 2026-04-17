@@ -26,17 +26,14 @@ Exit codes:
 from __future__ import annotations
 
 import ast
-import os
 import sys
 import time
 from pathlib import Path
 
 import aeo_quant  # noqa: F401 — triggers numpy compat shim
 from aeo_quant.core.config import load_dotenv, quant_env, results_dir, setup_cuda_allocator
-from aeo_quant.gpu.memory import mem_report, preflight_memory
+from aeo_quant.gpu.memory import mem_report
 from aeo_quant.harness import HarnessUnavailable, get_or_start_harness
-
-MIN_FREE_GB = float(os.environ.get("PARITY_MIN_FREE_GB", "50"))
 
 load_dotenv()
 setup_cuda_allocator()
@@ -88,13 +85,12 @@ def main() -> int:
         f"[parity] QUANT_FORMAT={QUANT_FORMAT} CHECKPOINT={CHECKPOINT} KV_BITS={KV_BITS}",
         flush=True,
     )
-    preflight_memory(MIN_FREE_GB, label="parity")
     mem_report("parity:start")
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     try:
-        client = get_or_start_harness()
+        client = get_or_start_harness(preflight_label="parity")
     except HarnessUnavailable as e:
         print(f"[FATAL] harness unavailable: {e}", file=sys.stderr)
         return 2

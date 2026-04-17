@@ -43,10 +43,10 @@ from .protocol import (
     STATUS_OK,
 )
 
-# Matches the example scripts' thresholds (parity/profile/quality = 50,
-# reasoning = 55, multi_turn = 60). Use the max of what any workload needs
-# since the harness serves all of them. Override via HARNESS_MIN_FREE_GB
-# for the native NVFP4 path (load peak ~20 GB, no FP8 dequant doubling).
+# Sized to the worst-case peak of any single workload (multi_turn).
+# NVFP4 loads in ~20 GB and FP8 in ~27 GB, both well under this gate;
+# the larger budget covers headroom for inference KV growth. Override
+# via HARNESS_MIN_FREE_GB to tune.
 MIN_FREE_GB = float(os.environ.get("HARNESS_MIN_FREE_GB", "60"))
 
 

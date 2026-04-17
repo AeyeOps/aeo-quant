@@ -253,6 +253,8 @@ def _tail_log_to_stdout(
 
 def get_or_start_harness(
     *,
+    preflight_min_free_gb: float | None = None,
+    preflight_label: str = "harness_spawn",
     wait_s: float = 300.0,
     verbose: bool = True,
 ) -> HarnessClient:
@@ -260,6 +262,14 @@ def get_or_start_harness(
 
     The spawned daemon is detached: it survives after this process exits
     and must be stopped explicitly with ``aeo-harness stop``.
+
+    A memory-headroom preflight runs **only when this call is about to
+    spawn a new daemon** — a thin client reconnecting to an
+    already-loaded harness doesn't need the headroom the fresh load
+    would. The threshold is read from the same env var the daemon itself
+    uses, ``HARNESS_MIN_FREE_GB`` (default 60 GB); explicit
+    ``preflight_min_free_gb`` overrides the env for callers that need a
+    different bar.
 
     During the spawn wait, the daemon's own log is streamed to this process's
     stdout — the user sees model-load progress in real time rather than a
@@ -272,6 +282,11 @@ def get_or_start_harness(
     client = try_connect()
     if client is not None:
         return client
+
+    if preflight_min_free_gb is None:
+        preflight_min_free_gb = float(os.environ.get("HARNESS_MIN_FREE_GB", "60"))
+    from aeo_quant.gpu.memory import preflight_memory
+    preflight_memory(preflight_min_free_gb, label=preflight_label)
 
     # Remember where the log ends before spawn so we only tail NEW content,
     # not whatever an earlier daemon wrote.

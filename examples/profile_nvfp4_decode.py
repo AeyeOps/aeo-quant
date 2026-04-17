@@ -14,7 +14,7 @@ before picking a lever (on-device alpha, flash-attention-2, etc.).
 
 Usage::
 
-    TRITON_OVERRIDE_ARCH=sm120 AEO_NVFP4_NATIVE=1 QUANT_FORMAT=nvfp4 \\
+    TRITON_OVERRIDE_ARCH=sm120 QUANT_FORMAT=nvfp4 \\
         uv run python examples/profile_nvfp4_decode.py
 
 Output: top-20 ops sorted by CPU time and top-20 by CUDA time. The
@@ -42,9 +42,6 @@ def main() -> int:
     load_dotenv()
     setup_cuda_allocator()
 
-    if os.environ.get("AEO_NVFP4_NATIVE") != "1":
-        print("[FATAL] AEO_NVFP4_NATIVE must be set to 1", file=sys.stderr)
-        return 2
     fmt, ckpt, kv = quant_env()
     if fmt != "nvfp4":
         print(f"[FATAL] QUANT_FORMAT must be 'nvfp4'", file=sys.stderr)

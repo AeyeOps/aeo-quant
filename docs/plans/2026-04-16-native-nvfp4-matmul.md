@@ -81,7 +81,7 @@ The MoE bridge calls `nvfp4_linear` per selected expert (same call site as today
 
 The tutorial expects two inputs: FP4 weights and per-block fp8 scales. Our checkpoint also has a per-tensor fp32 global scale (Level 2). Two options:
 
-**Option A — fold at load (simpler, faster runtime):** multiply the fp32 tensor scale into the fp8 block scales once during `_convert_nvfp4_experts_to_fp8` replacement. Risk: any individual `(block_scale × tensor_scale)` product that overflows fp8_e4m3's 448.0 max corrupts that block. Must add an overflow check at fold time and either fall back to Option B for that expert or clamp with a logged warning. From our current checkpoint stats, `tensor_scale` is typically ~0.001–0.01 and `block_scale` typically ≤ 10, so overflow risk is low but must be verified per-tensor before shipping.
+**Option A — fold at load (simpler, faster runtime):** multiply the fp32 tensor scale into the fp8 block scales once at load time. Risk: any individual `(block_scale × tensor_scale)` product that overflows fp8_e4m3's 448.0 max corrupts that block. Must add an overflow check at fold time and either fall back to Option B for that expert or clamp with a logged warning. From our current checkpoint stats, `tensor_scale` is typically ~0.001–0.01 and `block_scale` typically ≤ 10, so overflow risk is low but must be verified per-tensor before shipping.
 
 **Option B — fold in epilogue (safer, one fmul per output tile):** keep the fp32 tensor scale as a kernel argument; multiply the accumulator by it after the matmul, before the bf16 down-cast. Cost: one vectorized fmul per `(BLOCK_M, BLOCK_N)` tile. Negligible vs the matmul itself.
 
@@ -133,9 +133,8 @@ Verify post-compile with `cuobjdump --dump-sass` that the issued opcode is `HMMA
 1. `bridges/gemma4/modeling_nvfp4.py` — flesh out `Gemma4TextExpertsNVFP4.forward()`:
    - Keep packed uint8, fp8 block scales, fp32 tensor scale as persistent buffers (already the case per current plan).
    - Per expert: call `nvfp4_linear(x, gate_up_packed[e], gate_up_scale[e], gate_up_tensor_scale[e])`, then SiLU gate × up product, then `nvfp4_linear(hidden, down_packed[e], down_scale[e], down_tensor_scale[e])`.
-2. `bridges/gemma4/loader.py` — remove the `_convert_nvfp4_experts_to_fp8` call from `load_gemma4_nvfp4()`. The experts stay NVFP4 all the way through. Keep the conversion function around as dead code for one version, delete in the next release.
+2. `bridges/gemma4/loader.py` — `load_gemma4_nvfp4()` keeps experts as NVFP4 buffers all the way through; no dequant-to-FP8 round trip.
 3. `_preconvert_fp8_scales` no longer applies to expert weights. Non-expert `_scaled_mm` path is unchanged.
-4. Add `AEO_NVFP4_NATIVE=1` gate on first ship so we can bisect if parity breaks. Remove the gate once shipped.
 
 ---
 
@@ -157,15 +156,15 @@ Verify post-compile with `cuobjdump --dump-sass` that the issued opcode is `HMMA
 - Pass criterion: decode ≥ 1.5× FP8 path, prefill ≥ 1.2× FP8 path. Below that, the kernel isn't worth the complexity; revisit.
 
 ### Gate 4 — full-model parity
-- `QUANT_FORMAT=nvfp4 AEO_NVFP4_NATIVE=1 uv run examples/parity_check.py`.
-- Pass criterion: output is coherent, reasoning_check.py passes on both prompts. Byte-exact match vs FP8 baseline is NOT required (native FP4 accumulates differently than FP8).
+- `QUANT_FORMAT=nvfp4 uv run examples/parity_check.py`.
+- Pass criterion: output is coherent, reasoning_check.py passes on both prompts. Byte-exact match vs FP8 baseline is NOT required (FP4 accumulates differently than FP8).
 
 ### Gate 5 — full-model tok/s
-- `QUANT_FORMAT=nvfp4 AEO_NVFP4_NATIVE=1 uv run examples/profile_generate.py`.
+- `QUANT_FORMAT=nvfp4 uv run examples/profile_generate.py`.
 - Pass criterion: decode ≥ 20 tok/s (target stretch 30+).
 
 ### Gate 6 — reasoning quality
-- `QUANT_FORMAT=nvfp4 AEO_NVFP4_NATIVE=1 uv run examples/reasoning_check.py`.
+- `QUANT_FORMAT=nvfp4 uv run examples/reasoning_check.py`.
 - Pass criterion: both prompts produce correct, rigorous output. Token-level divergence is expected and fine; semantic correctness is the bar.
 
 ---
@@ -243,7 +242,7 @@ Fork `docs/references/triton_tutorial_10_v36.py` into `src/aeo_quant/gpu/nvfp4_m
 
 ### Step 3 — Hook into Gemma 4 bridge
 
-Replace `Gemma4TextExpertsNVFP4.forward()`'s `raise RuntimeError(...)` with a loop that calls our `nvfp4_linear` per selected expert. Keep conversion fallback behind `AEO_NVFP4_NATIVE=0` env flag for bisection.
+Replace `Gemma4TextExpertsNVFP4.forward()`'s `raise RuntimeError(...)` with a loop that calls our `nvfp4_linear` per selected expert.
 
 ### Step 4 — Verification gates 1–6
 

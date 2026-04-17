@@ -252,9 +252,8 @@ runs (see `docs/plans/bubbly-humming-deer.md` for the verification protocol).
 
 ### Added
 
-- Diagnostic logging in `_convert_nvfp4_experts_to_fp8()` and
-  `load_gemma4_nvfp4()` — per-layer timing, `mem_report()` at key checkpoints,
-  helps catch future memory regressions.
+- Diagnostic logging in `load_gemma4_nvfp4()` — per-layer timing,
+  `mem_report()` at key checkpoints, helps catch future memory regressions.
 - `parity_check.py` now prints stage-by-stage timing and memory reports.
 - KB note `kb/nvfp4-blackwell-research.md`: "Conversion Cache Removed" section.
 

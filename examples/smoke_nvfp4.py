@@ -1,24 +1,20 @@
 #!/usr/bin/env python3
-"""End-to-end NVFP4-native smoke test.
+"""End-to-end NVFP4 smoke test.
 
-Loads the full Gemma 4 NVFP4 checkpoint with ``AEO_NVFP4_NATIVE=1``,
-does a 1-token warmup to trigger ``torch.compile``, then generates
-``GEN_TOKENS`` (default 50) greedy tokens and reports tok/s.
+Loads the full Gemma 4 NVFP4 checkpoint, does a 1-token warmup to
+trigger ``torch.compile``, then generates ``GEN_TOKENS`` (default 50)
+greedy tokens and reports tok/s.
 
-Exercises the full forward path end-to-end (all 30 layers, all
-experts through the 3D decode kernel, attention, embedding, lm_head).
-Per-expert / per-kernel correctness lives in ``test_nvfp4_bridge.py``
-and ``test_nvfp4_3d_kernel.py``; this is the smallest "does the whole
-stack compose" check.
-
-MIN_FREE_GB here is 20 (vs ``profile_generate.py``'s 50) because the
-native path avoids the NVFP4 → FP8 dequant step that temporarily
-doubles expert memory during load.
+Exercises the full forward path end-to-end (all 30 layers, all experts
+through the 3D decode kernel, attention, embedding, lm_head). Per-expert
+and per-kernel correctness live in ``test_nvfp4_bridge.py`` and
+``test_nvfp4_3d_kernel.py``; this is the smallest "does the whole stack
+compose" check.
 
 Usage::
 
-    TRITON_OVERRIDE_ARCH=sm120 AEO_NVFP4_NATIVE=1 QUANT_FORMAT=nvfp4 \\
-        uv run python examples/smoke_nvfp4_native.py
+    TRITON_OVERRIDE_ARCH=sm120 QUANT_FORMAT=nvfp4 \\
+        uv run python examples/smoke_nvfp4.py
 
 Env overrides: ``GEN_TOKENS`` (default 50), ``SMOKE_PROMPT``.
 Exits 0 if tokens generate; 1 on any error.
@@ -43,9 +39,6 @@ def main() -> int:
     load_dotenv()
     setup_cuda_allocator()
 
-    if os.environ.get("AEO_NVFP4_NATIVE") != "1":
-        print("[FATAL] AEO_NVFP4_NATIVE must be set to 1", file=sys.stderr)
-        return 2
     if os.environ.get("TRITON_OVERRIDE_ARCH") != "sm120":
         print("[WARN] TRITON_OVERRIDE_ARCH is not 'sm120' — "
               "kernel will fall back to slow decomposition")
@@ -55,12 +48,11 @@ def main() -> int:
         print(f"[FATAL] QUANT_FORMAT must be 'nvfp4', got {fmt!r}", file=sys.stderr)
         return 2
 
-    print(f"=== nvfp4 native smoke test ===")
+    print(f"=== nvfp4 smoke test ===")
     print(f"checkpoint: {ckpt}")
     print(f"TRITON_OVERRIDE_ARCH = {os.environ.get('TRITON_OVERRIDE_ARCH')}")
-    print(f"AEO_NVFP4_NATIVE = {os.environ.get('AEO_NVFP4_NATIVE')}")
 
-    preflight_memory(MIN_FREE_GB, label="smoke_nvfp4_native")
+    preflight_memory(MIN_FREE_GB, label="smoke_nvfp4")
 
     tokenizer_id = os.environ.get("TOKENIZER_ID", "google/gemma-4-26B-A4B-it")
     print(f"\n--- loading tokenizer {tokenizer_id} ---")
@@ -71,7 +63,7 @@ def main() -> int:
         return 1
 
     from aeo_quant.bridges.gemma4.loader import load_gemma4
-    print("\n--- loading model with AEO_NVFP4_NATIVE=1 ---")
+    print("\n--- loading model ---")
     t_load = time.monotonic()
     try:
         model = load_gemma4(ckpt, quant_format="nvfp4")
@@ -88,9 +80,8 @@ def main() -> int:
         "The capital of France is",
     )
     inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
-    print(f"\n--- generating 1 token from prompt {prompt!r} ({inputs['input_ids'].shape[1]} tokens input) ---")
+    print(f"\n--- warmup from prompt {prompt!r} ({inputs['input_ids'].shape[1]} tokens input) ---")
 
-    # Warmup: one token to trigger compile + warm caches
     t0 = time.monotonic()
     try:
         with torch.no_grad():
@@ -103,7 +94,6 @@ def main() -> int:
     warmup_ms = (time.monotonic() - t0) * 1000
     print(f"[warmup] {warmup_ms:.1f}ms for 1 token (compile + prefill)")
 
-    # Steady-state: generate N tokens, measure tok/s
     n_tokens = int(os.environ.get("GEN_TOKENS", "50"))
     print(f"\n--- generating {n_tokens} tokens ({prompt!r}) ---")
     t0 = time.monotonic()
@@ -121,7 +111,7 @@ def main() -> int:
     mem_report("after_generate")
 
     if out.shape[1] > inputs["input_ids"].shape[1]:
-        print(f"\n[PASS] {new_tokens} tokens generated via native NVFP4 path at {tok_per_s:.2f} tok/s")
+        print(f"\n[PASS] {new_tokens} tokens at {tok_per_s:.2f} tok/s")
         return 0
     print("\n[FAIL] no new tokens produced")
     return 1

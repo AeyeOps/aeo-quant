@@ -9,7 +9,7 @@ perturbation).
 
 Usage::
 
-    TRITON_OVERRIDE_ARCH=sm120 AEO_NVFP4_NATIVE=1 QUANT_FORMAT=nvfp4 \\
+    TRITON_OVERRIDE_ARCH=sm120 QUANT_FORMAT=nvfp4 \\
         uv run python examples/probe_logits_at_divergence.py
 
 Prints the top-10 tokens with logits and softmax probabilities at a
@@ -33,7 +33,6 @@ QUANT_FORMAT, CHECKPOINT, KV_BITS = quant_env()
 preflight_memory(20, label="probe_logits")
 
 print(f"[probe] QUANT_FORMAT={QUANT_FORMAT}")
-print(f"[probe] AEO_NVFP4_NATIVE={os.environ.get('AEO_NVFP4_NATIVE', '(unset)')}")
 
 from aeo_quant.bridges.gemma4.cache import Gemma4HybridTurboQuantCache
 from aeo_quant.bridges.gemma4.loader import load_gemma4

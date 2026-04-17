@@ -301,10 +301,6 @@ Two memories saved to help future sessions catch this class of mistake earlier:
 - `feedback_batch_expert_conversion.md` — the optimization that changed the cost
 - `feedback_ask_before_heavy_gpu.md` — the near-miss with system freeze
 
-### When the cache *would* make sense again
-
-If CUTLASS/FlashInfer sm_121 bugs get fixed and we switch to native FP4 inference, we'd keep NVFP4 weights on CUDA (not convert to FP8). At that point the cache question becomes moot — there's no conversion to cache. Current `_convert_nvfp4_experts_to_fp8` becomes dead code we'd remove.
-
 ---
 
 ## Roadmap — next decode-speed optimizations

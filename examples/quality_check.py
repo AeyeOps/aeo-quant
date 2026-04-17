@@ -25,10 +25,8 @@ import sys
 import aeo_quant  # noqa: F401 — triggers np.trapz compat shim before numpy is used
 from aeo_quant.core.coherence import check_output_coherent
 from aeo_quant.core.config import load_dotenv, quant_env, setup_cuda_allocator
-from aeo_quant.gpu.memory import mem_report, preflight_memory
+from aeo_quant.gpu.memory import mem_report
 from aeo_quant.harness import HarnessUnavailable, get_or_start_harness
-
-MIN_FREE_GB = 50.0
 
 load_dotenv()
 setup_cuda_allocator()
@@ -73,11 +71,10 @@ def main() -> int:
         f"KV_BITS={KV_BITS}",
         flush=True,
     )
-    preflight_memory(MIN_FREE_GB, label="quality")
     mem_report("quality:start")
 
     try:
-        client = get_or_start_harness()
+        client = get_or_start_harness(preflight_label="quality")
     except HarnessUnavailable as e:
         print(f"[FATAL] harness unavailable: {e}", file=sys.stderr)
         return 2

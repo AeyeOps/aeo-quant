@@ -1,6 +1,8 @@
 # Native NVFP4 matmul on sm_121 — breakthrough summary
 
-**Status:** Working. 25 TFLOPS untuned. Live-validated on GB10.
+**Status:** Working end-to-end.  Full Gemma 4 26B-A4B produces
+coherent output via native `mma.sync.kind::mxf4nvf4` on GB10.
+112 TFLOPS peak (burst), 5.45 tok/s steady-state.
 **Date:** 2026-04-17
 
 ## TL;DR

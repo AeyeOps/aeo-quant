@@ -1,26 +1,27 @@
 #!/usr/bin/env python3
-"""Minimal end-to-end NVFP4-native smoke test.
+"""End-to-end NVFP4-native smoke test.
 
-Loads the full Gemma 4 NVFP4 checkpoint with ``AEO_NVFP4_NATIVE=1``
-and generates one token from a two-word prompt.  Intended as a
-lightest-possible plan Gate 4 / 5 precursor.
+Loads the full Gemma 4 NVFP4 checkpoint with ``AEO_NVFP4_NATIVE=1``,
+does a 1-token warmup to trigger ``torch.compile``, then generates
+``GEN_TOKENS`` (default 50) greedy tokens and reports tok/s.
 
-Per-expert correctness is already validated by
-``examples/test_nvfp4_bridge.py``.  This script exercises the full
-forward path (all 30 layers, all experts, attention, embedding,
-lm_head) once end-to-end.
+Exercises the full forward path end-to-end (all 30 layers, all
+experts through the 3D decode kernel, attention, embedding, lm_head).
+Per-expert / per-kernel correctness lives in ``test_nvfp4_bridge.py``
+and ``test_nvfp4_3d_kernel.py``; this is the smallest "does the whole
+stack compose" check.
 
-MIN_FREE_GB here is 20 (vs profile_generate.py's 50) because the
-native path avoids the NVFP4 -> FP8 dequant step that temporarily
+MIN_FREE_GB here is 20 (vs ``profile_generate.py``'s 50) because the
+native path avoids the NVFP4 → FP8 dequant step that temporarily
 doubles expert memory during load.
 
 Usage::
 
-    TRITON_OVERRIDE_ARCH=sm120 AEO_NVFP4_NATIVE=1 \\
-        QUANT_FORMAT=nvfp4 \\
+    TRITON_OVERRIDE_ARCH=sm120 AEO_NVFP4_NATIVE=1 QUANT_FORMAT=nvfp4 \\
         uv run python examples/smoke_nvfp4_native.py
 
-Exits 0 if one token generates; 1 on any error.
+Env overrides: ``GEN_TOKENS`` (default 50), ``SMOKE_PROMPT``.
+Exits 0 if tokens generate; 1 on any error.
 """
 from __future__ import annotations
 

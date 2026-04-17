@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
-"""Profile a NVFP4-native decode step to confirm launch-bound hypothesis.
+"""Profile a NVFP4-native decode step — where does per-token time go now?
 
 Loads the full Gemma 4 26B-A4B NVFP4 checkpoint with the native kernel
 path enabled, warms up torch.compile, then uses ``torch.profiler`` to
 capture 10 decode steps and reports the breakdown.
 
-Goal: show whether the 5.45 tok/s end-to-end is launch-bound (as
-suspected — 240 Triton launches × ~0.5 ms each) or actually
-compute-bound.  If Python/launch overhead far exceeds kernel body
-time, CUDA graphs or 3D fused experts are the right lever.
+Launch-bound was the diagnosis on the per-expert 2D path (240 Triton
+launches per token at ~0.5 ms each → ~234 ms CPU per token vs ~78 ms
+CUDA). The 3D fused-experts kernel cut per-MoE-layer launches from 8
+to 2, and we now run ~75 ms per token — effectively at the CUDA
+floor for this kernel. Use this profiler to spot the next bottleneck
+before picking a lever (on-device alpha, flash-attention-2, etc.).
 
 Usage::
 
     TRITON_OVERRIDE_ARCH=sm120 AEO_NVFP4_NATIVE=1 QUANT_FORMAT=nvfp4 \\
         uv run python examples/profile_nvfp4_decode.py
 
-Output: top-20 ops sorted by CPU time and top-20 by CUDA time.  The
-gap (CPU time - CUDA time) is approximately the launch overhead.
+Output: top-20 ops sorted by CPU time and top-20 by CUDA time. The
+gap (CPU time − CUDA time) is the launch-overhead component.
 """
 from __future__ import annotations
 

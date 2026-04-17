@@ -18,6 +18,7 @@ reconverting. See ``docs/gemma4-fp8-optimization.md`` for the full story.
 from __future__ import annotations
 
 import contextlib
+import os
 
 import torch
 from transformers import AutoModelForCausalLM
@@ -205,15 +206,25 @@ def _convert_nvfp4_experts_to_fp8(model):
 
 
 def load_gemma4_nvfp4(model_id_or_path, **from_pretrained_kwargs):
-    """Load a self-built NVFP4 Gemma 4 checkpoint, converting to FP8 at load.
+    """Load a self-built NVFP4 Gemma 4 checkpoint.
 
-    Every load runs the NVFP4 -> bf16 -> FP8 conversion (~10s on GB10 with
-    batched 16-experts-at-a-time dequant).  An earlier design cached the
-    converted FP8 tensors to ``.fp8_cache/`` for reuse, but the batching
-    optimization made conversion so fast that cache load (~124s of disk I/O)
-    was always slower than reconverting.  See docs/gemma4-fp8-optimization.md.
+    Two modes, controlled by the ``AEO_NVFP4_NATIVE`` env var:
 
-    Inference uses the identical ``_scaled_mm`` path as ``load_gemma4_fp8``.
+    * Unset or ``0`` (default): converts NVFP4 -> bf16 -> FP8 in-place at
+      load and inference runs through the proven ``_scaled_mm`` FP8 path.
+      Takes ~10 s on GB10 with batched 16-experts-at-a-time dequant.
+
+    * ``1``: keeps FP4 weights in GPU memory for the lifetime of the
+      model.  Inference routes through
+      :func:`aeo_quant.gpu.nvfp4_matmul.nvfp4_linear`, a Triton
+      ``tl.dot_scaled`` kernel.  Also requires
+      ``TRITON_OVERRIDE_ARCH=sm120`` on sm_121 (GB10), per
+      ``kb/nvfp4-blackwell-research.md``.
+
+    An earlier version always did the FP8 conversion and cached the
+    result on disk; the batching optimization made conversion so fast
+    that the cache was always slower than reconverting.  See
+    docs/gemma4-fp8-optimization.md.
     """
     import time
 
@@ -221,6 +232,8 @@ def load_gemma4_nvfp4(model_id_or_path, **from_pretrained_kwargs):
 
     from_pretrained_kwargs.setdefault("dtype", torch.bfloat16)
     from_pretrained_kwargs.setdefault("device_map", "cuda")
+
+    native = os.environ.get("AEO_NVFP4_NATIVE", "0") == "1"
 
     mem_report("nvfp4_load:start")
     t_load = time.time()
@@ -230,6 +243,25 @@ def load_gemma4_nvfp4(model_id_or_path, **from_pretrained_kwargs):
         )
     print(f"[nvfp4] from_pretrained done in {time.time() - t_load:.1f}s", flush=True)
     mem_report("nvfp4_load:after from_pretrained")
+
+    if native:
+        print(
+            "[nvfp4] AEO_NVFP4_NATIVE=1 — keeping FP4 weights for native matmul",
+            flush=True,
+        )
+        if os.environ.get("TRITON_OVERRIDE_ARCH") != "sm120":
+            print(
+                "[nvfp4] WARNING: TRITON_OVERRIDE_ARCH is not 'sm120'. "
+                "On sm_121 (GB10) this is required for tl.dot_scaled to "
+                "route to native FP4 MMA; without it the kernel falls "
+                "through to a slow decomposition. "
+                "See kb/nvfp4-blackwell-research.md.",
+                flush=True,
+            )
+        mem_report("nvfp4_load:done (native)")
+        # torch.compile the model — same wrap as the FP8 path.  The
+        # nvfp4 forward stays on its native class; no preconvert step.
+        return torch.compile(model, mode="reduce-overhead", dynamic=False)
 
     print("[nvfp4] converting NVFP4 -> bf16 -> FP8", flush=True)
     _convert_nvfp4_experts_to_fp8(model)

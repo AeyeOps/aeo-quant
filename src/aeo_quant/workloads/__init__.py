@@ -4,13 +4,19 @@ Each workload exposes ``run(model, tokenizer, **kwargs) -> dict`` where the
 returned dict is JSON-serializable. No filesystem I/O, no baseline comparison,
 no pretty printing — those live in the CLI wrappers so the server stays a
 thin queue around the GPU work.
+
+Exception: the ``multi_turn`` workload writes per-turn artifacts to a
+client-provided ``out_dir``. See its module docstring for the rationale.
 """
 
-from . import parity
+from . import multi_turn, parity, quality, reasoning
 
 # Registry used by the harness server to dispatch by workload name.
 WORKLOADS = {
     "parity": parity.run,
+    "reasoning": reasoning.run,
+    "quality": quality.run,
+    "multi_turn": multi_turn.run,
 }
 
-__all__ = ["WORKLOADS", "parity"]
+__all__ = ["WORKLOADS", "multi_turn", "parity", "quality", "reasoning"]

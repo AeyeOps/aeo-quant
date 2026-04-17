@@ -321,3 +321,5 @@ Scope: `transformers.generate()` + our bridge, GB10, no extra memory pressure un
 **Execution order (proposed):** R1 first (cheapest signal), R2 torchao probe in parallel (20 min, one expert, no full-model load), then either wire torchao or commit to the Triton kernel plan. R3 after R2 lands. R4 stays on the list but won't be touched until/unless TurboQuant scope changes.
 
 **Out of scope reminder:** anything that requires switching backends (vLLM, TRT-LLM, llama.cpp, FlashInfer-as-backend) is not on this roadmap. See `feedback_aeo_quant_transformers_only`.
+
+**Harness coverage (2026-04-17):** all five benchmark examples (`parity_check`, `reasoning_check`, `quality_check`, `multi_turn_16k`, `multi_turn_32k`) now run via the `aeo-harness` daemon and share the streaming event protocol. Model load happens once at daemon start; each example dispatches a named workload and reconstructs terminal UX from `STATUS_EVENT` frames. No in-process model load paths remain.

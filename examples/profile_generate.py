@@ -25,8 +25,10 @@ import time
 # the process. If the switch is on but nsys isn't attached, re-exec under it
 # so the markers actually land in a trace. Run under nsys already -> skip.
 if os.environ.get("AEO_MOE_TRACE") == "1" and "NSYS_PROFILING_SESSION_ID" not in os.environ:
-    from aeo_quant.core.config import results_dir as _results_dir
-    _outdir = _results_dir("nsys")
+    from aeo_quant.core.config import load_dotenv as _load_dotenv, quant_env as _quant_env, results_dir as _results_dir
+    _load_dotenv()
+    _fmt, _, _kv = _quant_env()
+    _outdir = _results_dir("nsys", format=_fmt, kv_bits=_kv)
     os.execvp("nsys", [
         "nsys", "profile",
         "--trace=cuda,nvtx",
@@ -57,7 +59,7 @@ TOKENIZER_ID = os.environ.get("TOKENIZER_ID", "google/gemma-4-26B-A4B-it")
 GEN_TOKENS = int(os.environ.get("GEN_TOKENS", "100"))
 PROFILE_TRACE = os.environ.get("PROFILE_TRACE", "0") != "0"
 COMPARE_KV = os.environ.get("COMPARE_KV", "0") != "0"
-RESULTS_DIR = results_dir("profiling")
+RESULTS_DIR = results_dir("profiling", format=QUANT_FORMAT, kv_bits=KV_BITS)
 
 PROMPT = (
     "You are a senior Python engineer.\n\n"

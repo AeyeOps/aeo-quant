@@ -1,155 +1,129 @@
 #!/usr/bin/env python3
 """Quick quality check — three diverse prompts, coherence verified.
 
-FP8-only — does not support QUANT_FORMAT env var. Use parity_check.py
-or reasoning_check.py for multi-format quality testing.
+Runs via the aeo-quant harness daemon. The harness holds whatever quantization
+format was requested at daemon start; this script enforces a format-match
+against ``QUANT_FORMAT`` before running, so switching formats is explicit.
 
-Loads the FP8 checkpoint once, fires three prompts (code, natural language,
-mixed), prints each response, and fails fast if output quality degrades.
-Takes about 5 minutes. Use this to verify a checkpoint before longer tests.
+Loads nothing in-process; dispatches the ``quality`` workload, prints each
+response, runs ``check_output_coherent`` + a tok/s >= 3.0 gate on the client
+side, and fails fast on any prompt that regresses.
 
 Usage:
     uv run python examples/quality_check.py
+    QUANT_FORMAT=nvfp4 uv run python examples/quality_check.py
+
+Exit codes:
+    0 — all prompts passed
+    2 — environment failure (no harness, format mismatch, no CUDA, etc.)
+    5+idx — prompt idx (1-based) failed coherence or tok/s gate
 """
 from __future__ import annotations
 
-import gc
-import os
 import sys
-import time
-from pathlib import Path
-
-import torch
-from transformers import AutoTokenizer
 
 import aeo_quant  # noqa: F401 — triggers np.trapz compat shim before numpy is used
-from aeo_quant.bridges.gemma4.loader import load_gemma4_fp8
 from aeo_quant.core.coherence import check_output_coherent
-from aeo_quant.core.config import load_dotenv, setup_cuda_allocator
-from aeo_quant.gpu.memory import enforce_cap, mem_report, preflight_memory
+from aeo_quant.core.config import load_dotenv, quant_env, setup_cuda_allocator
+from aeo_quant.gpu.memory import mem_report, preflight_memory
+from aeo_quant.harness import HarnessUnavailable, get_or_start_harness
 
-# Memory budget (unified LPDDR5X on GB10): load ~30 GB + torch.compile warmup
-# ~10-15 GB + 5 GB safety. Fails fast if baseline is too high.
 MIN_FREE_GB = 50.0
 
 load_dotenv()
 setup_cuda_allocator()
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-VRAM_CAP_GB = float(os.environ.get("VRAM_CAP_GB", "90.0"))
-TOKENIZER_ID = os.environ.get("TOKENIZER_ID", "google/gemma-4-26B-A4B-it")
+QUANT_FORMAT, CHECKPOINT, KV_BITS = quant_env()
 MAX_NEW_TOKENS = 512
-KV_BITS = int(os.environ.get("KV_BITS", "4"))
+TOK_S_FLOOR = 3.0
 
-FP8_CHECKPOINT = os.environ.get("FP8_CHECKPOINT")
-if not FP8_CHECKPOINT:
+
+def _on_event(event: dict) -> None:
+    t = event.get("type")
+    if t == "prompt_start":
+        print(f"\n[prompt {event['idx']}] {event['label']}", flush=True)
+    elif t == "prompt_complete":
+        # Fuller detail printed client-side after we have decoded text.
+        pass
+
+
+def _check_harness_format(client) -> int:
+    info = client.status()
+    srv_format = info.get("quant_format")
+    if srv_format != QUANT_FORMAT:
+        print(
+            f"[FATAL] harness is loaded with {srv_format!r}, "
+            f"you requested {QUANT_FORMAT!r}.\n"
+            f"        Restart the harness with `aeo-harness stop && "
+            f"aeo-harness start --format {QUANT_FORMAT}`.",
+            file=sys.stderr,
+        )
+        return 2
     print(
-        "[FATAL] FP8_CHECKPOINT not set. Add it to .env or export it.",
-        file=sys.stderr,
+        f"[quality] using harness (uptime={info.get('uptime_s')}s, "
+        f"jobs_served={info.get('jobs_served')}, queue={info.get('queue_depth')})",
+        flush=True,
     )
-    sys.exit(1)
-FP8_CHECKPOINT = Path(FP8_CHECKPOINT)
-
-PROMPTS = [
-    ("code_quicksort",
-     "Write a Python quicksort function and briefly explain how it works."),
-    ("nl_merkle_tree",
-     "Explain in two paragraphs, without any code, what a Merkle tree is "
-     "and why Git uses them."),
-    ("mixed_pandas_ts",
-     "I have a pandas DataFrame with a 'timestamp' column of ISO-8601 "
-     "strings. Show me how to convert it to datetime and filter rows from "
-     "the last 7 days. Explain each step briefly."),
-]
+    return 0
 
 
-def main() -> None:
+def main() -> int:
+    print(
+        f"[quality] QUANT_FORMAT={QUANT_FORMAT} CHECKPOINT={CHECKPOINT} "
+        f"KV_BITS={KV_BITS}",
+        flush=True,
+    )
     preflight_memory(MIN_FREE_GB, label="quality")
-    mem_report("start")
-
-    if not torch.cuda.is_available():
-        print("[FATAL] CUDA not available.", file=sys.stderr)
-        sys.exit(1)
-    if not FP8_CHECKPOINT.exists():
-        print(f"[FATAL] checkpoint missing: {FP8_CHECKPOINT}", file=sys.stderr)
-        sys.exit(1)
-
-    print(f"[preflight] device: {torch.cuda.get_device_name(0)}")
-    print(f"[preflight] checkpoint: {FP8_CHECKPOINT}")
-    enforce_cap("preflight", VRAM_CAP_GB)
+    mem_report("quality:start")
 
     try:
-        from turboquant import TurboQuantCache
-    except ImportError:
-        print("[FATAL] turboquant not installed.", file=sys.stderr)
-        sys.exit(1)
+        client = get_or_start_harness()
+    except HarnessUnavailable as e:
+        print(f"[FATAL] harness unavailable: {e}", file=sys.stderr)
+        return 2
 
-    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_ID)
-    enforce_cap("after tokenizer", VRAM_CAP_GB)
+    rc = _check_harness_format(client)
+    if rc != 0:
+        return rc
 
-    print("[load] FP8 model...")
-    t0 = time.time()
-    model = load_gemma4_fp8(str(FP8_CHECKPOINT))
-    print(f"[load] done in {time.time() - t0:.1f}s")
-    mem_report("model loaded")
-    enforce_cap("after model load", VRAM_CAP_GB)
+    result = client.run_workload(
+        "quality",
+        on_event=_on_event,
+        max_new_tokens=MAX_NEW_TOKENS,
+        kv_bits=KV_BITS,
+    )
 
     passed = 0
-    for idx, (label, prompt_text) in enumerate(PROMPTS, 1):
-        print(f"\n[prompt {idx}/{len(PROMPTS)}] {label}")
-        messages = [{"role": "user", "content": prompt_text}]
-        prompt_str = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        inputs = tokenizer(prompt_str, return_tensors="pt").to(model.device)
-        n_input = int(inputs["input_ids"].shape[-1])
-
-        cache = TurboQuantCache(bits=KV_BITS)
-        t0 = time.time()
-        with torch.inference_mode():
-            outputs = model.generate(
-                **inputs, max_new_tokens=MAX_NEW_TOKENS,
-                past_key_values=cache, use_cache=True, do_sample=False,
-            )
-        gen_time = time.time() - t0
-        enforce_cap(f"prompt {idx} after generate", VRAM_CAP_GB)
-
-        n_new = int(outputs.shape[-1] - n_input)
-        tok_per_s = n_new / gen_time if gen_time > 0 else 0.0
-        new_ids = outputs[0][n_input:].tolist()
-        decoded = tokenizer.decode(outputs[0][n_input:], skip_special_tokens=True)
-
-        # Show the user what the model said
+    records = result["prompts"]
+    for idx, record in enumerate(records, start=1):
+        decoded = record["decoded"]
         print(f"\n{'─' * 60}")
         print(decoded if decoded else "<EMPTY>")
         print(f"{'─' * 60}")
-        print(f"  {n_new} tokens in {gen_time:.1f}s ({tok_per_s:.1f} tok/s)")
+        print(
+            f"  {record['gen_tokens']} tokens in {record['gen_ms'] / 1000:.1f}s "
+            f"({record['tok_s']:.1f} tok/s)"
+        )
 
-        failures = check_output_coherent(decoded, new_ids)
-        if tok_per_s < 3.0:
-            failures.append(f"tok/s = {tok_per_s:.1f} (< 3.0)")
+        failures = check_output_coherent(decoded, record["new_ids"])
+        if record["tok_s"] < TOK_S_FLOOR:
+            failures.append(f"tok/s = {record['tok_s']:.1f} (< {TOK_S_FLOOR})")
 
         if failures:
             for f in failures:
                 print(f"  FAIL: {f}", file=sys.stderr)
-            print(f"\n[FATAL] prompt {idx} ({label}) failed", file=sys.stderr)
-            sys.exit(5 + idx)
+            print(
+                f"\n[FATAL] prompt {idx} ({record['label']}) failed",
+                file=sys.stderr,
+            )
+            return 5 + idx
 
         print("  PASS")
         passed += 1
 
-        del cache, outputs, inputs
-        gc.collect()
-
-    del model, tokenizer
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-    print(f"\n[done] {passed}/{len(PROMPTS)} prompts passed")
+    print(f"\n[done] {passed}/{len(records)} prompts passed")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -2,6 +2,71 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.9] - 2026-04-17
+
+### Added
+
+- **Three new workloads** in `aeo_quant.workloads`, completing the retrofit
+  commitment from v0.1.8:
+  - `reasoning` — 2 hard prompts (Sylow proof, concurrent LRU bugs), 500
+    tokens each. Per-prompt events and per-prompt output records that carry a
+    `file` field; baselines live at
+    `results/reasoning/baseline_<format>-<bits>bit/` (per-format, per-bits).
+  - `quality` — 3 diverse prompts (quicksort, merkle tree, pandas). Workload
+    is pure compute; coherence check and the `tok/s >= 3.0` gate run on the
+    client so the workload contract stays free of pass/fail semantics.
+  - `multi_turn` — long multi-turn conversations with KV cache reuse, target
+    context (16K / 32K), per-turn metrics/transcript/memtrail files written to
+    a client-provided `out_dir`, `MemoryCapStoppingCriteria` watchdog. Emits
+    `turn_start`, `thinking_text`, `thinking_end`, `answer_chunk`,
+    `turn_complete`, and `memory_warning` events.
+- **`HarnessStreamer`** (`aeo_quant.bridges.gemma4.streamer`) — subclasses
+  `LiveStreamer` to inherit its phase machine and TTFT tracking; overrides
+  `on_finalized_text` to emit structured events through an `emit` callback
+  instead of writing ANSI-decorated text to stderr. Thinking is part of the
+  model's output, so it's always streamed as `thinking_text` events (with a
+  buffer tail preserved across calls so close markers split at the boundary
+  still resolve). Clients render thinking in dim-cyan under a `[thinking]`
+  header, answer in bold under `[answer]` — the two phases are visually
+  distinct from each other and from user/tool content.
+
+### Changed
+
+- **All five benchmark examples now run via the harness daemon.** Four
+  examples retrofitted onto the streaming protocol (the fifth, `parity_check`,
+  shipped in v0.1.8):
+  - `examples/reasoning_check.py` — harness-only, no in-process model load.
+  - `examples/quality_check.py` — harness-only and generalized to
+    `QUANT_FORMAT` (reads from `quant_env()` like the others); drops the
+    `FP8_CHECKPOINT` hardcoding so NVFP4 quality runs work without a code
+    change.
+  - `examples/multi_turn_16k.py` and `examples/multi_turn_32k.py` —
+    harness-only. The client reconstructs live terminal UX (dim-cyan
+    `[thinking]`, bold `[answer]`, carriage-return status line) from streamed
+    events, then generates the transcript HTML and dashboard PNG.
+- **`stdout.log` scope for retrofitted examples.** Content that previously
+  came from the in-process generation loop (per-turn `CudaTimer`,
+  `mem_report`, etc.) now originates in the daemon and goes to
+  `~/.aeo-quant/harness.log`. Client-side `stdout.log` retains preflight,
+  event summaries, and post-run diffs. `tail ~/.aeo-quant/harness.log` for
+  full daemon-side detail.
+- **`LIVE=0` and `VERBOSE_THINK=1` env vars removed from
+  `multi_turn_16k.py` / `multi_turn_32k.py`.** Thinking is part of the model's
+  output, so the workload always streams it — no config flag, no alternate
+  heartbeat mode. Users who want a silent run can redirect stderr:
+  `uv run examples/multi_turn_16k.py 2>/dev/null`.
+- **`results_dir()` now stamps the quant format and KV bits into the
+  run-stem** when callers pass `format=` and `kv_bits=`. Layout is now
+  `results/<category>/<format>-<bits>bit-<timestamp>/` for all four
+  retrofitted examples — sortable by time, groupable by quant shape via
+  glob (e.g. `ls results/reasoning/nvfp4-3bit-*`). The bare-timestamp
+  layout is still the fallback when format/bits aren't supplied, and
+  `RESULTS_DIR` env override still bypasses all formatting. The reasoning
+  baseline path moved to `results/reasoning/baseline_<format>-<bits>bit/`
+  so an FP8 baseline can no longer be silently compared against an NVFP4
+  run (which was the source of the 86.8% divergence seen in the v0.1.8
+  NVFP4 verification).
+
 ## [0.1.8] - 2026-04-16
 
 ### Added

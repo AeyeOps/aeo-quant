@@ -12,8 +12,8 @@ Usage:
     uv run examples/parity_check.py        # generates; establishes baseline if absent
 
 Outputs:
-    results/parity/YYYYMMDD-HHMMSS/output.txt     # this run (per-run subdir, SDK-standard)
-    tests/fixtures/parity_baseline_{fp8,nvfp4}.txt  # per-format baseline
+    results/parity/<format>-<bits>bit-YYYYMMDD-HHMMSS/output.txt  # this run
+    tests/fixtures/parity_baseline_{fp8,nvfp4}.txt                # per-format baseline
 
 Baselines are per-format. NVFP4 runs also report divergence vs the FP8 baseline
 as an informational quality delta (not a gate).
@@ -43,7 +43,7 @@ setup_cuda_allocator()
 QUANT_FORMAT, CHECKPOINT, KV_BITS = quant_env()
 GEN_TOKENS = 50
 
-RESULTS_DIR = results_dir("parity")
+RESULTS_DIR = results_dir("parity", format=QUANT_FORMAT, kv_bits=KV_BITS)
 BASELINE_DIR = Path("tests/fixtures")
 OWN_BASELINE = BASELINE_DIR / f"parity_baseline_{QUANT_FORMAT}.txt"
 FP8_BASELINE = BASELINE_DIR / "parity_baseline_fp8.txt"

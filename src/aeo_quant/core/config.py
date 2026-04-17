@@ -113,11 +113,22 @@ def quant_env() -> tuple[str, Path, int]:
     return fmt, Path(ckpt), kv_bits
 
 
-def results_dir(category: str, *, timestamped: bool = True) -> Path:
+def results_dir(
+    category: str,
+    *,
+    format: str | None = None,
+    kv_bits: int | None = None,
+    timestamped: bool = True,
+) -> Path:
     """Create and return a results directory.
 
     Default layout: ``results/{category}/{YYYYMMDD-HHMMSS}/``.
-    Honors the ``RESULTS_DIR`` env var as an override.
+
+    When both ``format`` and ``kv_bits`` are provided, the timestamp stem is
+    prefixed with them so runs are sortable by time and groupable by quant
+    shape via glob: ``results/{category}/{format}-{kv_bits}bit-{YYYYMMDD-HHMMSS}/``.
+
+    Honors the ``RESULTS_DIR`` env var as an override (bypasses all formatting).
     """
     override = os.environ.get("RESULTS_DIR")
     if override:
@@ -125,6 +136,9 @@ def results_dir(category: str, *, timestamped: bool = True) -> Path:
     else:
         d = Path("results") / category
         if timestamped:
-            d = d / datetime.now().strftime("%Y%m%d-%H%M%S")
+            stem = datetime.now().strftime("%Y%m%d-%H%M%S")
+            if format is not None and kv_bits is not None:
+                stem = f"{format}-{kv_bits}bit-{stem}"
+            d = d / stem
     d.mkdir(parents=True, exist_ok=True)
     return d

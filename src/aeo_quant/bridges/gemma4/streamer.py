@@ -9,11 +9,18 @@ Usage::
 
     streamer = LiveStreamer(tokenizer)
     model.generate(..., streamer=streamer)
+
+Also provides :class:`HarnessStreamer`, a structured-event emitter used by
+workloads running inside the harness daemon — same phase machine, but each
+state transition becomes a dict pushed through an ``emit`` callback instead
+of ANSI-decorated writes to stderr. The harness client reconstructs terminal
+UX from those events.
 """
 from __future__ import annotations
 
 import sys
 import time
+from collections.abc import Callable
 
 from transformers import TextStreamer
 
@@ -177,3 +184,127 @@ class LiveStreamer(TextStreamer):
     def _w(self, s: str) -> None:
         sys.stderr.write(s)
         sys.stderr.flush()
+
+
+class HarnessStreamer(LiveStreamer):
+    """Structured-event streamer for workloads running inside the harness daemon.
+
+    Inherits ``put`` (TTFT tracking, token counting) and marker strings from
+    :class:`LiveStreamer`; overrides ``on_finalized_text`` to emit structured
+    events via the ``emit`` callback instead of writing ANSI-decorated text to
+    stderr. The client reconstructs terminal UX from the event stream.
+
+    The model's thinking is part of its output — we always stream it. Three
+    event types, each carrying ``turn: int``:
+
+      - ``{"type": "thinking_text", "text": str}`` — thinking chunks. Each
+        ``on_finalized_text`` call flushes the buffer up to ``max_marker_len``
+        bytes from its tail (so a close marker split across calls is still
+        detectable on the next one). Small chunks may buffer silently until
+        enough text accumulates.
+      - ``{"type": "thinking_end", "tokens": k, "elapsed_s": float}`` — emitted
+        once when the thinking-close marker is detected.
+      - ``{"type": "answer_chunk", "text": str}`` — the answer phase; one per
+        ``on_finalized_text`` call.
+
+    A single ``on_finalized_text`` that contains the close marker may emit up
+    to three events: a final ``thinking_text`` (if unflushed thinking remains),
+    then ``thinking_end``, then ``answer_chunk`` (if non-whitespace text
+    followed the marker in the same chunk).
+
+    ``turn_start``, ``turn_complete``, and ``memory_warning`` are emitted by the
+    workload — they don't correspond to streamer state transitions.
+    """
+
+    def __init__(
+        self,
+        tokenizer,
+        *,
+        emit: Callable[[dict], None],
+        turn: int,
+        **kwargs,
+    ) -> None:
+        # LiveStreamer accepts verbose_think; we don't expose it — thinking is
+        # always streamed. verbose_think is forced to False on the parent so
+        # its stderr paths (which we shadow) can't fire stray ANSI.
+        super().__init__(tokenizer, verbose_think=False, **kwargs)
+        self._emit = emit
+        self._turn = turn
+
+    # -- phase machine (overrides LiveStreamer.on_finalized_text) --------------
+
+    def on_finalized_text(self, text: str, stream_end: bool = False):
+        self._buf += text
+
+        # --- prefix: waiting for thinking to start ----------------------------
+        if self._phase == "prefix":
+            pos = self._buf.find(self._think_start)
+            if pos != -1:
+                self._phase = "thinking"
+                self._buf = self._buf[pos + len(self._think_start) :]
+            elif stream_end:
+                # no thinking phase at all — emit remaining buffer as answer
+                if self._buf:
+                    self._emit_safe({"type": "answer_chunk", "turn": self._turn, "text": self._buf})
+                    self._buf = ""
+                return
+
+        # --- thinking ---------------------------------------------------------
+        if self._phase == "thinking":
+            max_m = max(len(m) for m in self._think_end)
+            for marker in self._think_end:
+                pos = self._buf.find(marker)
+                if pos != -1:
+                    thinking_text = self._buf[:pos]
+                    remainder = self._buf[pos + len(marker) :]
+                    self._buf = ""
+                    self._phase = "answer"
+                    self._think_end_at = self._n_tokens
+
+                    if thinking_text:
+                        self._emit_safe({
+                            "type": "thinking_text",
+                            "turn": self._turn,
+                            "text": thinking_text,
+                        })
+
+                    elapsed = time.monotonic() - self._t0
+                    self._emit_safe({
+                        "type": "thinking_end",
+                        "turn": self._turn,
+                        "tokens": self._n_tokens,
+                        "elapsed_s": round(elapsed, 3),
+                    })
+                    if remainder.strip():
+                        self._emit_safe({
+                            "type": "answer_chunk",
+                            "turn": self._turn,
+                            "text": remainder,
+                        })
+                    break
+            else:
+                # Still thinking — stream whatever text has accumulated,
+                # keeping only the last ``max_m`` bytes in the buffer so any
+                # close-marker split across calls is still detectable.
+                if len(self._buf) > max_m:
+                    flush_upto = len(self._buf) - max_m
+                    self._emit_safe({
+                        "type": "thinking_text",
+                        "turn": self._turn,
+                        "text": self._buf[:flush_upto],
+                    })
+                    self._buf = self._buf[flush_upto:]
+
+        # --- answer -----------------------------------------------------------
+        elif self._phase == "answer":
+            if text:
+                self._emit_safe({"type": "answer_chunk", "turn": self._turn, "text": text})
+
+    # -- helpers ---------------------------------------------------------------
+
+    def _emit_safe(self, event: dict) -> None:
+        """Swallow emit errors — a broken callback must not kill generation."""
+        try:
+            self._emit(event)
+        except Exception:
+            pass

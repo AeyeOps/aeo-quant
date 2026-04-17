@@ -1,506 +1,231 @@
 #!/usr/bin/env python3
-"""Multi-turn conversation benchmark.
+"""Multi-turn conversation benchmark at 32K context.
 
-Has a progressively harder coding conversation with the model across five
-context window sizes (16K, 32K, 48K, 64K, 128K). Starts by asking the
-model to build a task queue system, then layer on features, tests,
-concurrency fixes, and architecture challenges as context grows.
-
-Measures per turn: tok/s, memory, thinking vs answer ratio, generation time.
-KV cache persists across turns (no redundant prefill).
+Runs via the aeo-quant harness daemon. Dispatches the ``multi_turn`` workload
+at ``target=32768`` with ``out_dir`` pointing at a timestamped per-run folder;
+the workload writes per-turn metrics/transcript/memtrail files directly there.
+Client-side, this script reconstructs the live terminal UX from streamed
+events, then generates the transcript HTML and performance dashboard.
 
 Produces per target:
-  - metrics JSONL    — per-turn numbers for analysis
-  - transcript HTML  — the actual conversation, open in a browser to read
-  - memory CSV       — per-turn memory time-series
-  - dashboard PNG    — performance charts (tok/s, memory, thinking, time)
-  - summary JSON     — per-target rollup
+  - run_32768.jsonl      — per-turn numbers for analysis
+  - transcript_32768.jsonl + transcript_32768.html — conversation for review
+  - memtrail_32768.csv   — per-turn memory snapshots
+  - plots/               — dashboard PNGs (via generate_dashboard)
+  - summary.json         — per-target rollup
 
 Usage:
     uv run python examples/multi_turn_32k.py
 
 Set FP8_CHECKPOINT (or NVFP4_CHECKPOINT + QUANT_FORMAT=nvfp4) in .env or env var.
+Exit codes:
+    0 — completed (possibly with per-turn errors inside the summary)
+    2 — environment failure (no harness, format mismatch, etc.)
 """
 from __future__ import annotations
 
-import gc
 import json
 import os
 import sys
 import time
-from datetime import UTC, datetime
-
-import psutil
-import torch
-from transformers import AutoTokenizer
 
 import aeo_quant  # noqa: F401 — triggers np.trapz compat shim before numpy is used
-from aeo_quant.bridges.gemma4.loader import load_gemma4
-from aeo_quant.bridges.gemma4.parser import GEMMA4_PARSER
-from aeo_quant.bridges.gemma4.streamer import LiveStreamer
-from aeo_quant.bridges.gemma4.template import incremental_turn_tokens
-from aeo_quant.core.coherence import check_output_coherent
-
-# .env is the final authority — overrides anything already in the shell
 from aeo_quant.core.config import load_dotenv, quant_env, results_dir, setup_cuda_allocator
 from aeo_quant.core.viewer import generate_html
-from aeo_quant.core.writers import CSVWriter, JSONLWriter, TranscriptWriter
-from aeo_quant.gpu.memory import (
-    _GB,
-    MemoryCapExceeded,
-    MemoryCapStoppingCriteria,
-    enforce_cap,
-    gb,
-    mem_report,
-    preflight_memory,
-)
+from aeo_quant.gpu.memory import mem_report, preflight_memory
+from aeo_quant.harness import HarnessUnavailable, get_or_start_harness
 from aeo_quant.plots.context_scaling import generate_dashboard
-from aeo_quant.prompts.project_arc import SYSTEM_MESSAGE, select_prompt
 
-load_dotenv()  # .env overrides shell env vars
-
-# Memory budget (unified LPDDR5X on GB10): load ~30 GB + compile warmup ~15 GB
-# + 32K KV growth + 15 GB safety. Fails fast if baseline too high.
 MIN_FREE_GB = 60.0
+CONTEXT_TARGET = 32768
+
+load_dotenv()
 setup_cuda_allocator()
 
-# ---------------------------------------------------------------------------
-# Configuration — sensible defaults, overridable via env vars
-# ---------------------------------------------------------------------------
 QUANT_FORMAT, CHECKPOINT, KV_BITS = quant_env()
 VRAM_CAP_GB = float(os.environ.get("VRAM_CAP_GB", "90.0"))
-TOKENIZER_ID = os.environ.get("TOKENIZER_ID", "google/gemma-4-26B-A4B-it")
-MAX_NEW_TOKENS = 10000
-TEMPLATE_OVERHEAD_PER_TURN = 20
-MIN_USEFUL_GENERATION = 512
-MEMORY_CHECK_EVERY_N_TOKENS = 100
-
-CONTEXT_TARGETS = [32768]
+MAX_NEW_TOKENS = int(os.environ.get("MAX_NEW_TOKENS", "10000"))
 MAX_TURNS = int(os.environ.get("MAX_TURNS", "0")) or None
-LIVE = os.environ.get("LIVE", "1") != "0"
-VERBOSE_THINK = os.environ.get("VERBOSE_THINK", "0") != "0"
 
-RESULTS_DIR = results_dir("context_scaling_32k")
+RESULTS_DIR = results_dir("context_scaling_32k", format=QUANT_FORMAT, kv_bits=KV_BITS)
 
 
-# Per-turn memory CSV header
-MEMTRAIL_HEADER = [
-    "turn", "label", "sys_used_gb", "sys_avail_gb", "torch_alloc_gb", "torch_peak_gb",
-]
+class _TerminalPrinter:
+    """Reconstruct the live terminal UX from HarnessStreamer events.
 
+    Thinking text streams in dim-cyan under a ``[thinking]`` header; answer
+    text streams under a bold ``[answer]`` header. Turn boundaries and memory
+    warnings print full lines.
+    """
 
-# ---------------------------------------------------------------------------
-# Preflight
-# ---------------------------------------------------------------------------
-def preflight() -> None:
-    if not torch.cuda.is_available():
-        print("[FATAL] CUDA not available — GPU-only.", file=sys.stderr)
-        sys.exit(1)
-    if not CHECKPOINT.exists():
-        print(f"[FATAL] checkpoint missing at {CHECKPOINT}.", file=sys.stderr)
-        sys.exit(1)
-    preflight_memory(MIN_FREE_GB, label="multi_turn_32k")
+    # ANSI
+    DIM = "\033[2m"
+    BOLD = "\033[1m"
+    CYAN = "\033[36m"
+    YELLOW = "\033[33m"
+    RESET = "\033[0m"
 
-    dev_name = torch.cuda.get_device_name(0)
-    cc_major, cc_minor = torch.cuda.get_device_capability(0)
-    vm = psutil.virtual_memory()
-    avail_gb = vm.available / _GB
+    def __init__(self) -> None:
+        self._in_thinking = False
+        self._in_answer = False
 
-    print(f"[preflight] device: {dev_name} (sm_{cc_major}{cc_minor})")
-    print(f"[preflight] torch: {torch.__version__}")
-    print(f"[preflight] unified mem available: {gb(vm.available)}")
-    print(f"[preflight] {QUANT_FORMAT} checkpoint: {CHECKPOINT}")
-    print(f"[preflight] targets: {CONTEXT_TARGETS}")
-    print(f"[preflight] safety cap: {VRAM_CAP_GB:.0f} GB")
+    def _reset_phase(self) -> None:
+        self._in_thinking = False
+        self._in_answer = False
 
-    if avail_gb < 50.0:
-        print(f"[FATAL] need 50 GB available, only {avail_gb:.1f} GB.", file=sys.stderr)
-        sys.exit(1)
-
-
-# ---------------------------------------------------------------------------
-# Single run at a given context target
-# ---------------------------------------------------------------------------
-def run_context_target(target, model, tokenizer, TurboQuantCache, model_weight_gb: float) -> dict:
-    fill_threshold = int(target * 0.80)
-
-    # Output paths for this target
-    metrics_path = RESULTS_DIR / f"run_{target}.jsonl"
-    transcript_path = RESULTS_DIR / f"transcript_{target}.jsonl"
-    memtrail_path = RESULTS_DIR / f"memtrail_{target}.csv"
-    if metrics_path.exists():
-        metrics_path.unlink()
-
-    print(f"\n{'=' * 60}")
-    print(f"[run] target={target:,}  fill_threshold={fill_threshold:,}")
-    print(f"{'=' * 60}")
-
-    # Initialize writers
-    metrics = JSONLWriter(metrics_path)
-    transcript = TranscriptWriter(
-        transcript_path, SYSTEM_MESSAGE,
-        config={"target": target, "cap_gb": VRAM_CAP_GB, "kv_cache_reuse": True},
-    )
-    memtrail = CSVWriter(memtrail_path, MEMTRAIL_HEADER)
-
-    conversation_history = [{"role": "system", "content": SYSTEM_MESSAGE}]
-
-    system_text = tokenizer.apply_chat_template(
-        conversation_history, tokenize=False,
-        add_generation_prompt=False, enable_thinking=True,
-    )
-    context_tokens = len(tokenizer.encode(system_text, add_special_tokens=False))
-    print(f"[run] system message tokens: {context_tokens}")
-
-    band_counters: dict[str, int] = {}
-    turn = 0
-    prev_eos_hit = True
-    cumulative_wall_s = 0.0
-    run_summary = {
-        "target": target, "fill_threshold": fill_threshold,
-        "turns_completed": 0, "final_context_tokens": context_tokens,
-        "final_fill_ratio": 0.0, "peak_sys_used_gb": 0.0, "error": None,
-    }
-
-    # KV cache persists across turns
-    cache = TurboQuantCache(bits=KV_BITS)
-    cache_seq_len = 0
-
-    try:
-      while True:
-        if context_tokens >= fill_threshold:
-            print(f"[run] fill threshold reached: {context_tokens:,} >= {fill_threshold:,}")
-            break
-        if fill_threshold - context_tokens < MIN_USEFUL_GENERATION:
-            print(f"[run] remaining < {MIN_USEFUL_GENERATION}, stopping")
-            break
-        if MAX_TURNS is not None and turn >= MAX_TURNS:
-            print(f"[run] MAX_TURNS={MAX_TURNS} reached")
-            break
-
-        fill_ratio = context_tokens / target if target > 0 else 0
-        prompt_label, prompt_text, prompt_difficulty = select_prompt(
-            turn, fill_ratio, band_counters,
-        )
-        print(f"\n[turn {turn}] {prompt_label} ({prompt_difficulty}) fill={fill_ratio:.1%}")
-
-        conversation_history.append({"role": "user", "content": prompt_text})
-
-        # Turn 0: full prompt. Turn N>0: incremental tokens only.
-        if turn == 0:
-            prompt_str = tokenizer.apply_chat_template(
-                conversation_history, tokenize=False,
-                add_generation_prompt=True, enable_thinking=True,
-            )
-            inputs = tokenizer(prompt_str, return_tensors="pt").to(model.device)
-            n_incremental = int(inputs["input_ids"].shape[-1])
-        else:
-            inc_str = incremental_turn_tokens(prompt_text, prev_eos_hit)
-            inc_ids = tokenizer.encode(
-                inc_str, add_special_tokens=False, return_tensors="pt"
-            ).to(model.device)
-            attn_mask = torch.ones(
-                1, cache_seq_len + inc_ids.shape[-1],
-                dtype=torch.long, device=model.device,
-            )
-            inputs = {"input_ids": inc_ids, "attention_mask": attn_mask}
-            n_incremental = int(inc_ids.shape[-1])
-
-        n_total_context = cache_seq_len + n_incremental
-        n_input = n_incremental
-        print(f"[turn {turn}] incremental={n_incremental:,}  total_context={n_total_context:,}")
-
-        mem_before = mem_report(f"turn {turn} before generate")
-        memtrail.write({
-            "turn": turn, "label": "before_generate",
-            "sys_used_gb": mem_before["sys_used_gb"],
-            "sys_avail_gb": round((psutil.virtual_memory().available) / _GB, 2),
-            "torch_alloc_gb": mem_before["torch_alloc_gb"],
-            "torch_peak_gb": mem_before["torch_peak_gb"],
-        })
-
-        try:
-            enforce_cap(f"turn {turn} after tokenization", VRAM_CAP_GB)
-            watchdog = MemoryCapStoppingCriteria(VRAM_CAP_GB, MEMORY_CHECK_EVERY_N_TOKENS)
-            enforce_cap(f"turn {turn} before generate", VRAM_CAP_GB)
-
-            streamer = LiveStreamer(tokenizer, verbose_think=VERBOSE_THINK) if LIVE else None
-
-            t0 = time.time()
-            with torch.inference_mode():
-                outputs = model.generate(
-                    **inputs,
-                    max_new_tokens=MAX_NEW_TOKENS,
-                    past_key_values=cache,
-                    use_cache=True,
-                    do_sample=False,
-                    stopping_criteria=[watchdog],
-                    streamer=streamer,
-                )
-            gen_time = time.time() - t0
-
-            cache_seq_len = cache.get_seq_length()
-
-            if watchdog.exceeded:
-                raise MemoryCapExceeded(
-                    f"watchdog stopped generation at turn {turn}: "
-                    f"peak={watchdog.peak_seen_gb:.1f} GB > cap={VRAM_CAP_GB:.0f} GB"
-                )
-
-            enforce_cap(f"turn {turn} after generate", VRAM_CAP_GB)
-            mem_after = mem_report(f"turn {turn} after generate")
-            memtrail.write({
-                "turn": turn, "label": "after_generate",
-                "sys_used_gb": mem_after["sys_used_gb"],
-                "sys_avail_gb": round((psutil.virtual_memory().available) / _GB, 2),
-                "torch_alloc_gb": mem_after["torch_alloc_gb"],
-                "torch_peak_gb": mem_after["torch_peak_gb"],
-            })
-
-            n_new = int(outputs.shape[-1] - n_input)
-            tok_per_s = n_new / gen_time if gen_time > 0 else 0.0
-
-            raw_text = tokenizer.decode(outputs[0][n_input:], skip_special_tokens=False)
-            segments = GEMMA4_PARSER.parse(raw_text)
-
-            # Generic per-type token counts — not hardcoded to thinking/answer
-            segment_token_counts: dict[str, int] = {}
-            segment_texts: dict[str, str] = {}
-            for seg in segments:
-                text = seg.content
-                toks = len(tokenizer.encode(text, add_special_tokens=False)) if text else 0
-                segment_token_counts[seg.type] = segment_token_counts.get(seg.type, 0) + toks
-                segment_texts[seg.type] = segment_texts.get(seg.type, "") + text
-
-            new_ids = outputs[0][n_input:].tolist()
-            thinking_tokens = segment_token_counts.get("thinking", 0)
-            answer_tokens = segment_token_counts.get("assistant", 0)
-            unknown_tokens = segment_token_counts.get("unknown", 0)
-            total_generated = sum(segment_token_counts.values())
-            thinking_ratio = thinking_tokens / total_generated if total_generated > 0 else 0.0
-            answer_text = segment_texts.get("assistant", "")
-
-            if unknown_tokens:
-                print(f"[turn {turn}] WARNING: {unknown_tokens} tokens in unknown segments")
-
-            eos_hit = n_new < MAX_NEW_TOKENS
-            prev_eos_hit = eos_hit
-
-            coherence_failures = check_output_coherent(raw_text, new_ids)
-            if coherence_failures:
-                print(f"[turn {turn}] coherence issues: {coherence_failures}")
-
-            # Record the conversation for human review
-            transcript.write_turn(
-                session_id=0,
-                session_topic=f"context_scaling_{target}",
-                turn_index=turn,
-                user_msg=prompt_text,
-                segments=segments,
-                raw_output=raw_text,
-                status="ok",
-                wall=gen_time,
-                ttft=0.0,  # not measured separately in local inference
-                prompt_tokens=n_total_context,
-                completion_tokens=n_new,
-                extra={
-                    "segment_token_counts": segment_token_counts,
-                    "thinking_tokens": thinking_tokens,
-                    "thinking_ratio": round(thinking_ratio, 4),
-                    "prompt_label": prompt_label,
-                    "prompt_difficulty": prompt_difficulty,
-                    "cache_seq_len": cache_seq_len,
-                    "coherence_failures": coherence_failures or None,
-                },
-            )
-
-            conversation_history.append({"role": "assistant", "content": answer_text})
-
-            user_tokens = len(tokenizer.encode(prompt_text, add_special_tokens=False))
-            context_tokens += user_tokens + answer_tokens + TEMPLATE_OVERHEAD_PER_TURN
-
+    def __call__(self, event: dict) -> None:
+        t = event.get("type")
+        if t == "turn_start":
+            self._reset_phase()
             print(
-                f"[turn {turn}] generated={n_new} in {gen_time:.1f}s "
-                f"({tok_per_s:.1f} tok/s), thinking={thinking_tokens}, "
-                f"answer={answer_tokens}, eos={eos_hit}"
+                f"\n[turn {event['turn']}] {event['prompt_label']} "
+                f"({event['prompt_difficulty']}) "
+                f"fill={event['fill_ratio']:.1%}  "
+                f"context={event['context_tokens']:,}",
+                flush=True,
             )
-            print(f"[turn {turn}] context={context_tokens:,} ({context_tokens / target:.1%})")
-
-            cumulative_wall_s += gen_time
-
-            # Metrics JSONL (for plots and analysis)
-            record = {
-                "run_target": target,
-                "turn": turn,
-                "timestamp": datetime.now(UTC).isoformat(),
-                "prompt_label": prompt_label,
-                "prompt_difficulty": prompt_difficulty,
-                "user_tokens": user_tokens,
-                "max_new_tokens": MAX_NEW_TOKENS,
-                "n_input_tokens": n_total_context,
-                "n_incremental_tokens": n_incremental,
-                "cache_seq_len": cache_seq_len,
-                "total_generated": total_generated,
-                "segment_token_counts": segment_token_counts,
-                "thinking_tokens": thinking_tokens,
-                "answer_tokens": answer_tokens,
-                "unknown_tokens": unknown_tokens,
-                "thinking_ratio": round(thinking_ratio, 4),
-                "context_tokens_before": (
-                    context_tokens - user_tokens - answer_tokens - TEMPLATE_OVERHEAD_PER_TURN
-                ),
-                "context_tokens_after": context_tokens,
-                "context_fill_ratio": round(context_tokens / target, 4),
-                "total_time_s": round(gen_time, 2),
-                "tok_per_s": round(tok_per_s, 2),
-                "ttft_s": (
-                    round(streamer.ttft, 4) if (streamer and streamer.ttft is not None) else None
-                ),
-                "model_weight_gb": model_weight_gb,
-                "cumulative_wall_s": round(cumulative_wall_s, 2),
-                "sys_total_gb": mem_after["sys_total_gb"],
-                "sys_used_before_gb": mem_before["sys_used_gb"],
-                "sys_used_after_gb": mem_after["sys_used_gb"],
-                "torch_alloc_gb": mem_after["torch_alloc_gb"],
-                "torch_peak_gb": mem_after["torch_peak_gb"],
-                "eos_hit": eos_hit,
-                "coherence_failures": coherence_failures or None,
-                "error": None,
-            }
-            metrics.write(record)
-
-            run_summary["turns_completed"] = turn + 1
-            run_summary["final_context_tokens"] = context_tokens
-            run_summary["final_fill_ratio"] = round(context_tokens / target, 4)
-            run_summary["peak_sys_used_gb"] = max(
-                run_summary["peak_sys_used_gb"], mem_after["sys_used_gb"],
+        elif t == "thinking_text":
+            # Print the [thinking] header once, then stream dim-cyan text so
+            # thinking is visually distinct from answer/user/tool content.
+            if not self._in_thinking:
+                self._in_thinking = True
+                sys.stderr.write(
+                    f"\n{self.DIM}{self.CYAN}[thinking]{self.RESET} "
+                    f"{self.DIM}{self.CYAN}"
+                )
+            sys.stderr.write(event["text"])
+            sys.stderr.flush()
+        elif t == "thinking_end":
+            if self._in_thinking:
+                sys.stderr.write(
+                    f"{self.RESET}\n"
+                    f"{self.DIM}[thinking done] {event['tokens']} tokens in "
+                    f"{event['elapsed_s']:.0f}s{self.RESET}\n"
+                )
+            else:
+                sys.stderr.write("\n")
+            sys.stderr.write(f"{self.BOLD}[answer]{self.RESET} ")
+            sys.stderr.flush()
+            self._in_thinking = False
+            self._in_answer = True
+        elif t == "answer_chunk":
+            if not self._in_answer:
+                sys.stderr.write(f"\n{self.BOLD}[answer]{self.RESET} ")
+                self._in_answer = True
+            sys.stderr.write(event["text"])
+            sys.stderr.flush()
+        elif t == "turn_complete":
+            ttft = event.get("ttft_s")
+            ttft_str = f"ttft={ttft:.2f}s" if ttft is not None else "ttft=n/a"
+            print(
+                f"\n[turn {event['turn']} done] "
+                f"gen_ms={event['gen_ms']:.0f} "
+                f"tok_s={event['tok_s']:.1f} {ttft_str} "
+                f"think={event['thinking_tokens']} "
+                f"answer={event['answer_tokens']} "
+                f"eos={event['eos_hit']} "
+                f"context={event['context_tokens_after']:,} "
+                f"({event['context_fill_ratio']:.1%})",
+                flush=True,
             )
-
-            del outputs, inputs
-            gc.collect()
-
-        except (torch.cuda.OutOfMemoryError, MemoryCapExceeded) as e:
-            error_type = "OOM" if isinstance(e, torch.cuda.OutOfMemoryError) else "cap_exceeded"
-            print(f"[turn {turn}] {error_type}: {e}", file=sys.stderr)
-            metrics.write({
-                "run_target": target, "turn": turn,
-                "timestamp": datetime.now(UTC).isoformat(),
-                "prompt_label": prompt_label, "prompt_difficulty": prompt_difficulty,
-                "error": error_type,
-            })
-            transcript.write_turn(
-                session_id=0, session_topic=f"context_scaling_{target}",
-                turn_index=turn, user_msg=prompt_text, assistant_msg="",
-                status="error", wall=0.0, ttft=0.0,
-                prompt_tokens=n_total_context, completion_tokens=0,
-                extra={"error": error_type},
+            if event.get("coherence_failures"):
+                print(
+                    f"  [warn] coherence: {event['coherence_failures']}",
+                    flush=True,
+                )
+            self._reset_phase()
+        elif t == "memory_warning":
+            print(
+                f"\n{self.YELLOW}[memory_warning] turn {event['turn']}: "
+                f"peak={event['peak_gb']:.1f} GB > cap={event['cap_gb']:.0f} GB"
+                f"{self.RESET}",
+                flush=True,
             )
-            run_summary["error"] = error_type
-            run_summary["turns_completed"] = turn
-            break
-
-        except Exception as e:
-            print(f"[turn {turn}] unexpected error: {e}", file=sys.stderr)
-            metrics.write({
-                "run_target": target, "turn": turn,
-                "timestamp": datetime.now(UTC).isoformat(),
-                "prompt_label": prompt_label, "prompt_difficulty": prompt_difficulty,
-                "error": str(e),
-            })
-            run_summary["error"] = str(e)
-            run_summary["turns_completed"] = turn
-            break
-
-        turn += 1
-
-    finally:
-        del cache
-        gc.collect()
-        transcript.close()
-        memtrail.close()
-
-    # Generate HTML transcript for human review
-    try:
-        html_path = generate_html(transcript_path)
-        print(f"[report] transcript: {html_path}")
-    except Exception as e:
-        print(f"[report] transcript generation failed: {e}", file=sys.stderr)
-
-    return run_summary
+        else:
+            msg = event.get("message")
+            if msg:
+                print(f"[event] {msg}", flush=True)
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-def main() -> None:
+def _check_harness_format(client) -> int:
+    info = client.status()
+    srv_format = info.get("quant_format")
+    if srv_format != QUANT_FORMAT:
+        print(
+            f"[FATAL] harness is loaded with {srv_format!r}, "
+            f"you requested {QUANT_FORMAT!r}.\n"
+            f"        Restart the harness with `aeo-harness stop && "
+            f"aeo-harness start --format {QUANT_FORMAT}`.",
+            file=sys.stderr,
+        )
+        return 2
+    print(
+        f"[multi_turn] using harness (uptime={info.get('uptime_s')}s, "
+        f"jobs_served={info.get('jobs_served')}, queue={info.get('queue_depth')})",
+        flush=True,
+    )
+    return 0
+
+
+def main() -> int:
+    print(
+        f"[multi_turn] QUANT_FORMAT={QUANT_FORMAT} CHECKPOINT={CHECKPOINT} "
+        f"KV_BITS={KV_BITS} target={CONTEXT_TARGET:,} cap={VRAM_CAP_GB:.0f} GB",
+        flush=True,
+    )
+    preflight_memory(MIN_FREE_GB, label="multi_turn_32k")
+    mem_report("multi_turn:start")
+
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    mem_report("start")
-    preflight()
-    enforce_cap("preflight", VRAM_CAP_GB)
-
     try:
-        from turboquant import TurboQuantCache
-    except ImportError:
-        print("[FATAL] turboquant not installed. Run: pip install turboquant", file=sys.stderr)
-        sys.exit(1)
+        client = get_or_start_harness()
+    except HarnessUnavailable as e:
+        print(f"[FATAL] harness unavailable: {e}", file=sys.stderr)
+        return 2
 
-    all_summaries = []
+    rc = _check_harness_format(client)
+    if rc != 0:
+        return rc
 
-    for target in CONTEXT_TARGETS:
-        model = None
-        tokenizer = None
-        try:
-            print(f"\n[load] tokenizer: {TOKENIZER_ID}")
-            tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_ID)
-            enforce_cap("after tokenizer", VRAM_CAP_GB)
+    printer = _TerminalPrinter()
+    t0 = time.time()
+    summary = client.run_workload(
+        "multi_turn",
+        on_event=printer,
+        target=CONTEXT_TARGET,
+        out_dir=str(RESULTS_DIR),
+        vram_cap_gb=VRAM_CAP_GB,
+        max_new_tokens=MAX_NEW_TOKENS,
+        kv_bits=KV_BITS,
+        max_turns=MAX_TURNS,
+    )
+    print(f"\n[multi_turn] workload finished in {time.time() - t0:.1f}s", flush=True)
 
-            print(f"[load] {QUANT_FORMAT.upper()} model: {CHECKPOINT}")
-            t0 = time.time()
-            model = load_gemma4(str(CHECKPOINT), quant_format=QUANT_FORMAT)
-            print(f"[load] model loaded in {time.time() - t0:.1f}s")
-            post_load = mem_report("model loaded")
-            model_weight_gb = post_load["torch_alloc_gb"]
-            enforce_cap("after model load", VRAM_CAP_GB)
+    all_summaries = [summary]
 
-            summary = run_context_target(target, model, tokenizer, TurboQuantCache, model_weight_gb)
-
-        except (torch.cuda.OutOfMemoryError, MemoryCapExceeded) as e:
-            error_type = "OOM" if isinstance(e, torch.cuda.OutOfMemoryError) else "cap_exceeded"
-            print(f"[load] {error_type} during setup for target={target}: {e}", file=sys.stderr)
-            summary = {
-                "target": target, "fill_threshold": int(target * 0.80),
-                "turns_completed": 0, "final_context_tokens": 0,
-                "final_fill_ratio": 0.0, "peak_sys_used_gb": 0.0,
-                "error": f"{error_type}_at_load",
-            }
-
-        all_summaries.append(summary)
-
-        print(f"\n[cleanup] tearing down model for target={target}")
-        del model, tokenizer
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.reset_peak_memory_stats()
-        post = mem_report("between runs")
-        if post["sys_used_gb"] > VRAM_CAP_GB * 0.75:
-            print(f"[warn] memory still high after cleanup: {post['sys_used_gb']:.1f} GB")
-
-    # Write summary
     summary_path = RESULTS_DIR / "summary.json"
     with open(summary_path, "w") as f:
         json.dump(all_summaries, f, indent=2)
+    print(f"[summary] written to {summary_path}")
 
-    # Generate performance dashboard
+    transcript_path = RESULTS_DIR / f"transcript_{CONTEXT_TARGET}.jsonl"
+    if transcript_path.exists():
+        try:
+            html_path = generate_html(transcript_path)
+            print(f"[report] transcript: {html_path}")
+        except Exception as e:
+            print(f"[report] transcript generation failed: {e}", file=sys.stderr)
+
     try:
-        generate_dashboard(RESULTS_DIR, title="Gemma 4 FP8 — 32K Context Scaling (KV Cache Reuse)")
+        generate_dashboard(
+            RESULTS_DIR,
+            title="Gemma 4 FP8 — 32K Context Scaling (KV Cache Reuse)",
+        )
         print(f"[report] dashboard: {RESULTS_DIR / 'plots'}")
     except Exception as e:
         print(f"[report] dashboard generation failed: {e}", file=sys.stderr)
 
-    # Final summary
-    print(f"\n[summary] written to {summary_path}")
     for s in all_summaries:
         status = f"error={s['error']}" if s["error"] else "OK"
         print(
@@ -511,7 +236,6 @@ def main() -> None:
             f"status={status}"
         )
 
-    # List all generated artifacts
     artifacts = sorted(RESULTS_DIR.glob("*"))
     print(f"\n[done] all results in {RESULTS_DIR}")
     for a in artifacts:
@@ -523,7 +247,6 @@ def main() -> None:
 
     print("\n[done] open transcript_*.html in a browser to review the conversation")
 
-    # Prompt the user can paste into an LLM to generate an analysis spreadsheet
     file_list = ", ".join(a.name for a in artifacts if a.is_file())
     print(f"""
 --- Copy the prompt below into Claude or ChatGPT to generate an analysis XLSX ---
@@ -592,7 +315,8 @@ Please create an analysis XLSX with these sheets:
 
 I'll paste the file contents below.
 ---""")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

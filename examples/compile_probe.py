@@ -71,7 +71,7 @@ def main() -> int:
 
     preflight_memory(MIN_FREE_GB, label="compile_probe")
 
-    rd = results_dir("compile")
+    rd = results_dir("compile", format="fp8", kv_bits=KV_BITS)
 
     print(f"[compile] device: {torch.cuda.get_device_name(0)}")
     print(f"[compile] torch: {torch.__version__}")

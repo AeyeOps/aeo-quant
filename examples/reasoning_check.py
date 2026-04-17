@@ -1,145 +1,64 @@
 #!/usr/bin/env python3
 """Reasoning quality check: two hard prompts that stress attention precision.
 
-Prompts:
-  1. Math proof — Sylow subgroup normality (tracks abstract constraints)
-  2. Concurrent LRU cache — find 4 interacting bugs (tracks shared mutable state)
-
-Both produce short output (~200-300 tokens) but require deep reasoning that
-degrades visibly when KV cache precision drops.
+Runs via the aeo-quant harness daemon (see `aeo-harness start`). The harness
+holds the model loaded; this script dispatches the ``reasoning`` workload,
+captures per-prompt events, writes per-prompt output files + timing.json, and
+diffs against a pinned per-kv-bits baseline.
 
 Usage:
     uv run examples/reasoning_check.py              # bits=4 (default)
     KV_BITS=3 uv run examples/reasoning_check.py    # test 3-bit KV cache
 
 Outputs:
-    results/reasoning/<timestamp>/
+    results/reasoning/<format>-<bits>bit-<timestamp>/
         prompt_1_math.txt       — full output + token IDs
         prompt_2_lru.txt        — full output + token IDs
-        timing.json             — aggregate timing + memory
-        stdout.log              — full console output
+        timing.json             — aggregate timing
+        stdout.log              — client-side prints (preflight, events, diffs).
+                                   Daemon-side per-token detail lives in
+                                   ~/.aeo-quant/harness.log.
 
-    If a baseline exists at results/reasoning/baseline_<bits>bit/,
+    If a baseline exists at results/reasoning/baseline_<format>-<bits>bit/,
     diffs against it and reports token-level match statistics.
 
 Exit codes:
     0 — completed (quality is assessed by reading the output, not automated)
-    2 — environment failure
+    2 — environment failure (no harness, format mismatch, etc.)
 """
 from __future__ import annotations
 
+import ast
 import atexit
 import json
-import os
 import sys
 from pathlib import Path
 
-import torch
-from transformers import AutoTokenizer
-
-import aeo_quant  # noqa: F401
+import aeo_quant  # noqa: F401 — triggers numpy compat shim
 from aeo_quant.core.config import load_dotenv, quant_env, results_dir, setup_cuda_allocator
 from aeo_quant.core.writers import Tee
-from aeo_quant.gpu.memory import CudaTimer, mem_report, preflight_memory
+from aeo_quant.gpu.memory import mem_report, preflight_memory
+from aeo_quant.harness import HarnessUnavailable, get_or_start_harness
 
-# Memory budget (unified LPDDR5X on GB10): load ~30 GB + torch.compile warmup
-# ~15 GB + 10 GB safety (longer decode than parity). Fails fast if baseline too high.
 MIN_FREE_GB = 55.0
 
 load_dotenv()
 setup_cuda_allocator()
 
 QUANT_FORMAT, CHECKPOINT, KV_BITS = quant_env()
-TOKENIZER_ID = os.environ.get("TOKENIZER_ID", "google/gemma-4-26B-A4B-it")
-GEN_TOKENS = int(os.environ.get("GEN_TOKENS", "500"))
+GEN_TOKENS = 500
 
-RESULTS_DIR = results_dir("reasoning")
-BASELINE_DIR = Path(f"results/reasoning/baseline_{KV_BITS}bit")
-
-
-PROMPTS = [
-    {
-        "name": "math_proof",
-        "file": "prompt_1_math.txt",
-        "system": "You are a pure mathematician. Write rigorous proofs.",
-        "user": (
-            "Prove that for any group G of order p²q, where p and q are "
-            "distinct primes with p² < q, the Sylow q-subgroup of G is normal.\n\n"
-            "Show every step: state Sylow's theorems, enumerate the "
-            "constraints on n_q, eliminate all possibilities except n_q = 1, "
-            "and conclude normality from uniqueness."
-        ),
-    },
-    {
-        "name": "lru_bugs",
-        "file": "prompt_2_lru.txt",
-        "system": "You are a senior systems engineer specializing in concurrent data structures.",
-        "user": (
-            "The following concurrent LRU cache has exactly 4 bugs that interact "
-            "with each other. Find all four, explain how they interact, and show "
-            "the corrected code.\n\n"
-            "```python\n"
-            "import threading\n"
-            "from collections import OrderedDict\n"
-            "\n"
-            "class ConcurrentLRUCache:\n"
-            "    def __init__(self, capacity=10, initial_items={}):\n"
-            "        self.capacity = capacity\n"
-            "        self.cache = OrderedDict(initial_items)\n"
-            "        self.lock = threading.Lock()\n"
-            "        self.eviction_lock = threading.Lock()\n"
-            "        self.hits = 0\n"
-            "        self.misses = 0\n"
-            "\n"
-            "    def get(self, key):\n"
-            "        with self.lock:\n"
-            "            if key in self.cache:\n"
-            "                self.cache.move_to_end(key)\n"
-            "                self.hits += 1\n"
-            "                return self.cache[key]\n"
-            "            self.misses += 1\n"
-            "            return None\n"
-            "\n"
-            "    def put(self, key, value):\n"
-            "        if key in self.cache:\n"
-            "            with self.lock:\n"
-            "                self.cache[key] = value\n"
-            "                self.cache.move_to_end(key)\n"
-            "            return\n"
-            "        with self.lock:\n"
-            "            self.cache[key] = value\n"
-            "        if len(self.cache) >= self.capacity:\n"
-            "            self._evict()\n"
-            "\n"
-            "    def _evict(self):\n"
-            "        with self.eviction_lock:\n"
-            "            with self.lock:\n"
-            "                if len(self.cache) >= self.capacity:\n"
-            "                    self.cache.popitem(last=False)\n"
-            "\n"
-            "    def stats(self):\n"
-            "        return {'hits': self.hits, 'misses': self.misses,\n"
-            "                'size': len(self.cache)}\n"
-            "```\n\n"
-            "The 4 bugs are:\n"
-            "1. A mutable default argument\n"
-            "2. A race condition in put() (check-then-act without lock)\n"
-            "3. A deadlock-prone lock ordering in _evict()\n"
-            "4. An off-by-one in the capacity check\n\n"
-            "For each bug: quote the exact line(s), explain the failure scenario, "
-            "and show the fix."
-        ),
-    },
-]
+RESULTS_DIR = results_dir("reasoning", format=QUANT_FORMAT, kv_bits=KV_BITS)
+BASELINE_DIR = Path(f"results/reasoning/baseline_{QUANT_FORMAT}-{KV_BITS}bit")
 
 
 def save_output(path: Path, name: str, token_ids: list[int], decoded: str,
-                gen_time_ms: float):
+                gen_ms: float) -> None:
     path.write_text(
         f"# reasoning_check: {name}\n"
         f"# kv_bits: {KV_BITS}\n"
         f"# gen_tokens: {len(token_ids)}\n"
-        f"# gen_time_ms: {gen_time_ms:.1f}\n"
+        f"# gen_time_ms: {gen_ms:.1f}\n"
         f"# all_token_ids: {token_ids}\n"
         f"# ---\n"
         f"{decoded}\n"
@@ -147,15 +66,14 @@ def save_output(path: Path, name: str, token_ids: list[int], decoded: str,
 
 
 def load_token_ids(path: Path) -> list[int]:
-    import ast
     for line in path.read_text().splitlines():
         if line.startswith("# all_token_ids: "):
             return ast.literal_eval(line[len("# all_token_ids: "):])
     raise ValueError(f"no token-ids line in {path}")
 
 
-def diff_against_baseline(prompt_info: dict, new_ids: list[int]):
-    baseline_file = BASELINE_DIR / prompt_info["file"]
+def diff_against_baseline(file_name: str, new_ids: list[int]) -> None:
+    baseline_file = BASELINE_DIR / file_name
     if not baseline_file.exists():
         return
     baseline_ids = load_token_ids(baseline_file)
@@ -171,11 +89,55 @@ def diff_against_baseline(prompt_info: dict, new_ids: list[int]):
     print(f"  [diff] max matching prefix: {max_prefix} tokens")
 
 
-def main() -> int:
-    preflight_memory(MIN_FREE_GB, label="reasoning")
-    if not torch.cuda.is_available():
-        print("[FATAL] CUDA not available", file=sys.stderr)
+def _on_event(event: dict) -> None:
+    t = event.get("type")
+    if t == "prompt_start":
+        print(
+            f"\n{'=' * 60}\n"
+            f"[reasoning] prompt {event['idx']}: {event['name']}\n"
+            f"{'=' * 60}",
+            flush=True,
+        )
+    elif t == "prompt_complete":
+        print(
+            f"  [timing] {event['gen_ms']:.1f} ms "
+            f"({event['tok_s']:.2f} tok/s)",
+            flush=True,
+        )
+    else:
+        msg = event.get("message")
+        if msg:
+            print(f"[event] {msg}", flush=True)
+
+
+def _check_harness_format(client) -> int:
+    info = client.status()
+    srv_format = info.get("quant_format")
+    if srv_format != QUANT_FORMAT:
+        print(
+            f"[FATAL] harness is loaded with {srv_format!r}, "
+            f"you requested {QUANT_FORMAT!r}.\n"
+            f"        Restart the harness with `aeo-harness stop && "
+            f"aeo-harness start --format {QUANT_FORMAT}`.",
+            file=sys.stderr,
+        )
         return 2
+    print(
+        f"[reasoning] using harness (uptime={info.get('uptime_s')}s, "
+        f"jobs_served={info.get('jobs_served')}, queue={info.get('queue_depth')})",
+        flush=True,
+    )
+    return 0
+
+
+def main() -> int:
+    print(
+        f"[reasoning] QUANT_FORMAT={QUANT_FORMAT} CHECKPOINT={CHECKPOINT} "
+        f"KV_BITS={KV_BITS} GEN_TOKENS={GEN_TOKENS}",
+        flush=True,
+    )
+    preflight_memory(MIN_FREE_GB, label="reasoning")
+    mem_report("reasoning:start")
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -184,120 +146,70 @@ def main() -> int:
     sys.stdout = Tee(sys.__stdout__, _log)
     sys.stderr = Tee(sys.__stderr__, _log)
 
-    print(f"[reasoning] device: {torch.cuda.get_device_name(0)}")
-    print(f"[reasoning] kv_bits: {KV_BITS}")
-    print(f"[reasoning] gen_tokens: {GEN_TOKENS}")
-    mem_report("start")
+    try:
+        client = get_or_start_harness()
+    except HarnessUnavailable as e:
+        print(f"[FATAL] harness unavailable: {e}", file=sys.stderr)
+        return 2
 
-    from aeo_quant.bridges.gemma4.loader import load_gemma4
-    model = load_gemma4(str(CHECKPOINT), quant_format=QUANT_FORMAT)
-    mem_report("model loaded")
+    rc = _check_harness_format(client)
+    if rc != 0:
+        return rc
 
-    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_ID)
-    from turboquant import TurboQuantCache
+    result = client.run_workload(
+        "reasoning",
+        on_event=_on_event,
+        gen_tokens=GEN_TOKENS,
+        kv_bits=KV_BITS,
+    )
 
-    # Warmup for torch.compile
-    _wc = TurboQuantCache(bits=KV_BITS)
-    _wi = tokenizer("warmup", return_tensors="pt").to(model.device)
-    with torch.inference_mode():
-        model.generate(**_wi, max_new_tokens=1, past_key_values=_wc,
-                        use_cache=True, do_sample=False)
-    del _wc, _wi
-    torch.cuda.empty_cache()
+    baseline_established = not BASELINE_DIR.exists()
+    if baseline_established:
+        BASELINE_DIR.mkdir(parents=True, exist_ok=True)
 
-    all_results = []
-
-    for i, prompt_info in enumerate(PROMPTS, 1):
-        print(f"\n{'=' * 60}")
-        print(f"[reasoning] prompt {i}/{len(PROMPTS)}: {prompt_info['name']}")
-        print(f"{'=' * 60}")
-
-        messages = [
-            {"role": "system", "content": prompt_info["system"]},
-            {"role": "user", "content": prompt_info["user"]},
-        ]
-        prompt_str = tokenizer.apply_chat_template(
-            messages, tokenize=False,
-            add_generation_prompt=True, enable_thinking=True,
+    for record in result["prompts"]:
+        out_path = RESULTS_DIR / record["file"]
+        save_output(
+            out_path,
+            record["name"],
+            record["all_token_ids"],
+            record["decoded"],
+            record["gen_ms"],
         )
-        inputs = tokenizer(prompt_str, return_tensors="pt").to(model.device)
-        n_prompt = inputs["input_ids"].shape[-1]
+        print(f"  [output] {out_path}", flush=True)
+        diff_against_baseline(record["file"], record["all_token_ids"])
 
-        cache = TurboQuantCache(bits=KV_BITS)
-        torch.manual_seed(0)
+        if baseline_established:
+            (BASELINE_DIR / record["file"]).write_text(out_path.read_text())
 
-        with CudaTimer(f"generate_{prompt_info['name']}") as timer, \
-                torch.inference_mode():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=GEN_TOKENS,
-                past_key_values=cache,
-                use_cache=True,
-                do_sample=False,
-            )
-
-        new_ids = outputs[0, n_prompt:].tolist()
-        decoded = tokenizer.decode(new_ids, skip_special_tokens=True)
-        gen_ms = timer.elapsed_ms
-
-        out_path = RESULTS_DIR / prompt_info["file"]
-        save_output(out_path, prompt_info["name"], new_ids, decoded, gen_ms)
-
-        n_gen = len(new_ids)
-        tok_s = n_gen / (gen_ms / 1000) if gen_ms > 0 else 0
-
-        print(f"  [timing] {n_gen} tokens in {gen_ms:.1f} ms = {tok_s:.2f} tok/s")
-        print(f"  [output] {out_path}")
-        diff_against_baseline(prompt_info, new_ids)
-
-        all_results.append({
-            "name": prompt_info["name"],
-            "prompt_tokens": n_prompt,
-            "generated_tokens": n_gen,
-            "gen_ms": round(gen_ms, 1),
-            "tok_s": round(tok_s, 2),
-        })
-
-        del cache
-        torch.cuda.empty_cache()
-
-    # Aggregate summary
-    total_tokens = sum(r["generated_tokens"] for r in all_results)
-    total_ms = sum(r["gen_ms"] for r in all_results)
-    avg_tok_s = total_tokens / (total_ms / 1000) if total_ms > 0 else 0
-
-    print(f"\n{'=' * 60}")
-    print("[reasoning] aggregate")
-    print(f"{'=' * 60}")
-    print(f"  total tokens:  {total_tokens}")
-    print(f"  total time:    {total_ms:.1f} ms")
-    print(f"  avg tok/s:     {avg_tok_s:.2f}")
+    aggregate = result["aggregate"]
+    print(f"\n{'=' * 60}\n[reasoning] aggregate\n{'=' * 60}")
+    print(f"  total tokens:  {aggregate['total_tokens']}")
+    print(f"  total time:    {aggregate['total_ms']:.1f} ms")
+    print(f"  avg tok/s:     {aggregate['avg_tok_s']:.2f}")
     print(f"  kv_bits:       {KV_BITS}")
-    mem_report("final")
+    mem_report("reasoning:final")
 
-    # Save timing
     timing_path = RESULTS_DIR / "timing.json"
     with open(timing_path, "w") as f:
         json.dump({
             "kv_bits": KV_BITS,
             "gen_tokens_per_prompt": GEN_TOKENS,
-            "prompts": all_results,
-            "aggregate": {
-                "total_tokens": total_tokens,
-                "total_ms": round(total_ms, 1),
-                "avg_tok_s": round(avg_tok_s, 2),
-            },
+            "prompts": [
+                {
+                    "name": r["name"],
+                    "prompt_tokens": r["prompt_tokens"],
+                    "generated_tokens": r["gen_tokens"],
+                    "gen_ms": r["gen_ms"],
+                    "tok_s": r["tok_s"],
+                }
+                for r in result["prompts"]
+            ],
+            "aggregate": aggregate,
         }, f, indent=2)
 
     print(f"  results:       {RESULTS_DIR}")
-
-    # Establish baseline if absent
-    if not BASELINE_DIR.exists():
-        BASELINE_DIR.mkdir(parents=True, exist_ok=True)
-        for prompt_info in PROMPTS:
-            src = RESULTS_DIR / prompt_info["file"]
-            dst = BASELINE_DIR / prompt_info["file"]
-            dst.write_text(src.read_text())
+    if baseline_established:
         print(f"  [baseline] established at {BASELINE_DIR}")
 
     return 0

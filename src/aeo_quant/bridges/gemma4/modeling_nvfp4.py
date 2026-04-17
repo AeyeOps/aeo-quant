@@ -39,6 +39,7 @@ from aeo_quant.gpu.quant import NVFP4_BLOCK_SIZE
 
 
 _MOE_TRACE = os.environ.get("AEO_MOE_TRACE") == "1"
+_DECODE_3D_ENABLED = os.environ.get("AEO_NVFP4_3D_DECODE", "1") == "1"
 
 
 def _moe_range(name: str):
@@ -115,7 +116,7 @@ class Gemma4TextExpertsNVFP4(Gemma4TextExperts):
         (one kernel per projection instead of one per expert per
         projection).
         """
-        if hidden_states.shape[0] == 1:
+        if _DECODE_3D_ENABLED and hidden_states.shape[0] == 1:
             return self._forward_decode_3d(
                 hidden_states, top_k_index, top_k_weights,
             )

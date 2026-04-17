@@ -201,3 +201,139 @@ Two realistic kernel paths from here (ranked by estimated effort):
 - flashinfer-ai/flashinfer: PRs #3051, #3066, #3080; Issue #3013
 - vllm-project/vllm: Issues #30163, #40082; PR #39920
 - Local verification: `uv run python -c "from triton.backends.nvidia.compiler import sm_arch_from_capability; print(sm_arch_from_capability(121))"` → `sm_121a`
+
+---
+
+## Second deep dive — 2026-04-17 PM (revised kernel strategy)
+
+Previous section's Path B ("inline PTX via Triton") is dead. This section supersedes it. Three major corrections.
+
+### Correction 1: PTX instruction names
+
+- `.kind::nvf4` **does not exist**. The PTX ISA has three FP4-related kinds:
+  - `.kind::mxf4` — pure MX-FP4 with `.ue8m0` scales, scale_vec::2X only
+  - `.kind::mxf4nvf4` — NVFP4 (NVIDIA's global×block FP4), supports `.ue8m0`@2X **or** `.ue4m3`@4X
+  - `.kind::mxf8f6f4` — mixed-precision, `.ue8m0`@1X only
+- NVFP4 canonical shape is **`m16n8k64`**, not `m16n8k32`. K=64 is fixed for mxf4/mxf4nvf4 (one block per MMA tile).
+- Under `.kind::mxf4` / `.kind::mxf4nvf4`, E2M1 is packed **8 values per `.b32` with no padding** — matches our uint8 layout after view.
+
+Verbatim example (PTX ISA 8.7 p. 450):
+```
+mma.sync.aligned.m16n8k64.row.col.kind::mxf4nvf4.block_scale.scale_vec::4X.f32.e2m1.e2m1.f32.ue4m3
+    {%Rd0..3}, {%Ra0..3}, {%Rb0..1}, {%Rc0..3},
+    scaleAData, {bidA, tidA}, scaleBData, {bidB, tidB};
+```
+For scale_vec::4X, `bidA = bidB = 0` (Table 38).
+
+### Correction 2: sm_121a PTX assembly works
+
+PTX ISA 8.8 (CUDA 13.0+) extended `.kind` / `.block_scale` / `.scale_vec_size` from `sm_120a` to the `sm_12x` **family target `sm_120f`**, which includes `sm_121a` as a later-generation a-target (PTX ISA 8.8 p. 511 — updated gating text).
+
+Chain:
+1. sm_121a is a later-generation a-target in the sm_12x family.
+2. Later-generation a-targets inherit family features from earlier f-targets.
+3. sm_120f (family target) has `.kind::mxf4` / `.kind::mxf4nvf4` / `.kind::mxf8f6f4`.
+4. Therefore sm_121a supports all these instructions.
+
+Confirmed empirically by llama.cpp issue #19662 and Triton issue #8539: **sm_121a assembles cleanly under CUDA 13 ptxas**. The bundled ptxas in Triton 3.6.0 is 13.1 (PR #8941), so this works out of the box on our install.
+
+### Correction 3: Triton `inline_asm_elementwise` cannot host `mma.sync`
+
+From Triton docs: *"Each invocation of the inline asm processes `pack` elements at a time. Exactly which set of inputs a block receives is unspecified."* `mma.sync` is **warp-collective** — it requires all 32 lanes to cooperate on a specific tile layout per the PTX ISA fragment tables. Elementwise inline asm provides no such guarantee.
+
+**Path B is dead at the Triton layer.** If we ever need inline PTX, it has to be in a CUDA C++ kernel, compiled with nvcc, loaded via torch.utils.cpp_extension — heavyweight scaffolding. Deferred as emergency-only fallback.
+
+### The actual blocker — `ScaledBlockedToMMA` in `AccelerateMatmul.cpp`
+
+Verified source at v3.6.0:
+
+```cpp
+// lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp:653
+class ScaledBlockedToMMA : public mlir::OpRewritePattern<triton::DotScaledOp> {
+  int computeCapability;
+public:
+  ...
+  mlir::LogicalResult matchAndRewrite(triton::DotScaledOp dotOp,
+                                      mlir::PatternRewriter &rewriter) const override {
+    if (computeCapability != 120)      // <-- line 665
+      return failure();
+    ...
+    auto mmaResult = createMMAEncodingForDot(dotOp, rewriter, computeCapability, 2);  // MMAv2
+    ...
+    auto ll = triton::gpu::getSM120DotScaledScaleLayout(
+        ctx, shape, opIdx, mmaWarps, blocked.getCTALayout());               // helper
+    ...
+  }
+};
+```
+
+Plus a secondary check in `mmav2SupportsFp8Operands` (line 911) — only for FP8-in-MMAv2 path, not on our critical NVFP4 route, but good to know:
+```cpp
+return computeCapability == 89 || computeCapability == 120;
+```
+
+**The SM120-specific helper `getSM120DotScaledScaleLayout` is called unconditionally** — if it has a `cc == 120` assert inside, the source patch alone isn't enough. Must grep the tree before rebuilding.
+
+### The cheap path first — `TRITON_OVERRIDE_ARCH=sm120`
+
+`AccelerateMatmul.cpp` reads capability from the `ttg.target` MLIR attribute (string `"cuda:<int>"`), which the Python NVIDIA backend stamps from `target.arch`. That in turn respects `knobs.runtime.override_arch`, which is populated from env var `TRITON_OVERRIDE_ARCH`.
+
+```python
+# third_party/nvidia/backend/compiler.py:177
+args = {'arch': knobs.runtime.override_arch or f"sm{self.target.arch}"}
+```
+
+So `TRITON_OVERRIDE_ARCH=sm120` causes Triton to compile as if the GPU were sm_120. The MMAv2 scaled pattern matches, MLIR lowers to `.kind::mxf4nvf4` PTX, ptxas assembles for sm_120 target, and the driver's runtime JIT loads it onto sm_121 — which is valid because consumer-Blackwell shares the same MMA encoding across sm_120/sm_121.
+
+Risks:
+1. Downstream instruction selection may emit sm_120-specific encodings that fail at driver load on sm_121. Empirically test, don't trust reasoning.
+2. ptxas target register-file / smem assumptions could differ. Check the cubin post-compile.
+3. The sm_121a family feature set is a *superset* of sm_120f, so the reverse (sm_121→sm_120) shouldn't drop required features. But verify with a tiny correctness probe.
+
+**5-minute test plan when GPU frees:**
+1. Write a 128×128×128 nvfp4 matmul kernel
+2. Compile twice: once with default sm_121a, once with TRITON_OVERRIDE_ARCH=sm120
+3. Default case: confirm `tl.dot_scaled` hits the fallback decomposition (slow).
+4. Override case: confirm the SM120 MMAv2 scaled pattern matches (fast), SASS shows `HMMA ... MXF4` ops (not fallback `FMA`).
+
+### The full-rebuild path — patching AccelerateMatmul.cpp
+
+If override-arch doesn't work, minimal diff:
+
+```diff
+// lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp
+-    if (computeCapability != 120)
++    if (computeCapability != 120 && computeCapability != 121)
+       return failure();
+
+// Also (for FP8 operands in MMAv2):
+-  return computeCapability == 89 || computeCapability == 120;
++  return computeCapability == 89 || computeCapability == 120 ||
++         computeCapability == 121;
+```
+
+Plus grep for `cc == 120` / `SM120` in related files. Likely to need adjustment:
+- `include/triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h`
+- `lib/Dialect/TritonGPU/IR/LinearLayoutConversions.cpp`
+- `third_party/nvidia/lib/...` NVGPU→LLVM conversions
+
+Triton build takes ~45 min from source. Do this only if the override doesn't work.
+
+### Revised strategy
+
+1. **Wait for GPU memory to free**, then run `probe_nvfp4_torchao.py` under the harness. Document exact failure. [expected: fail on _scaled_mm]
+2. **5-minute probe**: write a minimal nvfp4 matmul with `tl.dot_scaled`, compile under `TRITON_OVERRIDE_ARCH=sm120`, compare SASS to default compile. [expected: override emits HMMA.MXF4, default emits FMA fallback]
+3. **If override works**: adapt tutorial 10 kernel for our shapes, integrate into `Gemma4TextExpertsNVFP4.forward()`, run verification gates.
+4. **If override doesn't work**: patch Triton source, rebuild locally, test again.
+5. **Last resort**: CUDA C++ extension with inline PTX, compile via torch.utils.cpp_extension. Only if Triton source patching hits walls.
+
+### Sources cited in this section
+
+- PTX ISA 8.7: https://docs.nvidia.com/cuda/pdf/ptx_isa_8.7.pdf (sections 9.7.14.3, 9.7.14.5.11, 9.7.14.5.14)
+- PTX ISA 8.8: https://docs.nvidia.com/cuda/pdf/ptx_isa_8.8.pdf (section 1.3, 11.1.2)
+- Triton v3.6.0 AccelerateMatmul.cpp: https://github.com/triton-lang/triton/blob/v3.6.0/lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp
+- CUTLASS mma_sm120.hpp: https://github.com/NVIDIA/cutlass/blob/main/include/cute/arch/mma_sm120.hpp
+- llama.cpp #19662 (sm_120 base vs sm_120a for mxf4)
+- Triton #8539 (sm_121a + CUDA 13 ptxas)
+- Triton `tl.inline_asm_elementwise` docs confirming non-warp-collective semantics
+- NVIDIA forums: "Run ptx mma.sync.aligned.kind::mxf8f6f4...sm_120a" thread

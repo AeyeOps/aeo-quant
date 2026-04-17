@@ -6,11 +6,15 @@
 
 **Major corrections to original plan (2026-04-17):**
 - `sm_121f` is NOT a real Triton target string. 3.6.0 only emits `sm_121a`. Delta 3 below is obsolete.
-- triton#8548 was never fixed. The real blocker is `AccelerateMatmul.cpp`'s `computeCapability != 120 → failure` in the native-FP4 MMAv2 lowering path (PR #8494).
-- GB10 has `mma.sync...kind::mxf4/nvf4` but NOT `tcgen05.mma.*`. Any tcgen05-path kernel is DOA — we target warp-level MMA only.
+- triton#8548 was never fixed. The real blocker is `AccelerateMatmul.cpp`'s `computeCapability != 120 → failure` in the native-FP4 MMAv2 lowering path.
+- GB10 has `mma.sync...kind::mxf4nvf4` (NOT `.kind::nvf4` — that name doesn't exist) but NOT `tcgen05.mma.*`. Any tcgen05-path kernel is DOA — we target warp-level MMA only.
+- Canonical NVFP4 MMA shape is `m16n8k64`, not `m16n8k32`. PTX ISA 8.8 (CUDA 13+) required.
 - torchao's `_addmm_nvfp4_dispatch` routes to `_scaled_mm`, which routes to cuBLAS, which lacks sm_121 FP4 support. The probe is still worth running, but expected-to-fail.
 - TMA on sm_121 in Triton 3.6.0 **does** work (PR #8498 shipped). The TMA load path is fine; only MMA lowering is broken.
-- Revised kernel strategy: Path A (patch `AccelerateMatmul.cpp` to accept sm_121) or Path B (inline-PTX `mma.sync...kind::nvf4` kernel). See re-survey section 8.
+- **Triton's `tl.inline_asm_elementwise` CANNOT host `mma.sync`** — it's not warp-collective. Inline PTX kernel strategy is dead at the Triton layer; would need CUDA C++ extension as fallback only.
+- **Primary strategy is now Path A.5: `TRITON_OVERRIDE_ARCH=sm120`**. The env var causes Triton to stamp "cuda:120" on the module, which makes `ScaledBlockedToMMA` match on sm_121 hardware without any rebuild. Test this FIRST before any source patch. See re-survey "second deep dive" section.
+- Fallback Path A: patch `AccelerateMatmul.cpp:665` guard, rebuild Triton.
+- Last resort Path B: CUDA C++ kernel with inline PTX via `torch.utils.cpp_extension`.
 
 ---
 
@@ -189,9 +193,58 @@ Verify post-compile with `cuobjdump --dump-sass` that the issued opcode is `HMMA
 
 ---
 
-## Where to start, literally
+## Where to start, literally (REVISED 2026-04-17)
 
-1. `examples/probe_nvfp4_torchao.py` — the 20-minute gate. If it passes, this whole plan moves to the R2 integration task.
-2. If probe fails, copy `third_party/triton/python/tutorials/10-block-scaled-matmul.py` into `src/aeo_quant/gpu/nvfp4_matmul.py`, strip the `matmul_ogs` wrapper, verify it compiles under `sm_121f` on a synthetic `(128, 128, 128)` input. That's Gate 1 + Gate 2 before touching our checkpoint.
-3. Then fold in Delta 1 (Option B epilogue), hook in our scale layout, run Gate 3.
-4. Then integrate into `Gemma4TextExpertsNVFP4.forward()` behind the env flag, run Gates 4–6.
+Ordered by risk (cheapest first, rebuild is expensive):
+
+### Step 0 — torchao probe (5 min, documents expected failure)
+
+`examples/probe_nvfp4_torchao.py` under `safe_probe.py`. Expected to fail on `_scaled_mm → cuBLAS`. Record exact rejection. Not a gate — just evidence.
+
+### Step 1 — TRITON_OVERRIDE_ARCH=sm120 compile probe (5 min, decides everything)
+
+Write a minimal nvfp4 matmul with `tl.dot_scaled` at synthetic 128×128×128 shape. Compile twice:
+
+```bash
+# default (sm_121a): should hit scaled-dot decomposition fallback
+uv run python examples/probe_nvfp4_minimal.py
+
+# override: should match ScaledBlockedToMMA and emit native FP4 MMA
+TRITON_OVERRIDE_ARCH=sm120 uv run python examples/probe_nvfp4_minimal.py
+```
+
+For each case, extract the compiled cubin and run `cuobjdump --dump-sass`:
+- Default: expect decomposed FP16 `FMA` or `HMMA` fallback ops
+- Override: expect `HMMA.MXF4` or `HMMA.NVFP4` — native block-scaled FP4 tensor core
+
+Also compare against bf16 reference. Correctness gate: max rel err < 20% (the fp4 round-trip floor).
+
+If override path works → Steps 2–4 in original plan apply without changes.
+If override path compiles but outputs garbage → likely sm_121-specific instruction encoding downstream; proceed to Step 1.5.
+If override path fails to compile → unexpected; read ptxas error carefully.
+
+### Step 1.5 — Patch Triton source and rebuild (45 min if needed)
+
+Diff the `computeCapability != 120` check to accept 121 per the research doc. Grep `SM120` across the tree for additional asserts. Build Triton from source:
+
+```bash
+cd third_party/triton   # or wherever we clone
+pip install -e python  # or build wheel
+```
+
+### Step 2 — Adapt tutorial 10 kernel for our shapes
+
+Fork `docs/references/triton_tutorial_10_v36.py` into `src/aeo_quant/gpu/nvfp4_matmul.py`. Key adjustments for GB10:
+- Strip `matmul_ogs` reference (tutorial doesn't use it anyway — original plan was wrong).
+- Shrink default tile: BLOCK_M=BLOCK_N=128, BLOCK_K=128, NUM_STAGES=2 (GB10 has 99 KiB smem vs 228 KiB on B200).
+- Add small-M GEMV specialization (M∈{1,8} for decode).
+- Drop `supports_block_scaling()` gate (or relax to accept sm_121).
+- Per-tensor scale (Option B epilogue): fold as a post-MMA fmul per tile.
+
+### Step 3 — Hook into Gemma 4 bridge
+
+Replace `Gemma4TextExpertsNVFP4.forward()`'s `raise RuntimeError(...)` with a loop that calls our `nvfp4_linear` per selected expert. Keep conversion fallback behind `AEO_NVFP4_NATIVE=0` env flag for bisection.
+
+### Step 4 — Verification gates 1–6
+
+Run in order. Each gates the next. Gates 4–6 require full model load (~27 GB VRAM) — must coordinate with other GPU users on this box.

@@ -415,3 +415,24 @@ is the durable plan — keep it updated with phase outcomes.
 - `docs/2026-04-17-nvfp4-sm121-breakthrough.md` — today's breakthrough writeup.
 - `docs/turboquant-gemma4-research.md` — TurboQuant is a KV cache; orthogonal to
   expert forward.
+
+## Phase outcomes (2026-04-17)
+
+All seven fail-fast phases passed. Commit SHAs in parentheses.
+
+| Phase | Outcome | Evidence |
+|---|---|---|
+| 0a | PASS (bcf626c) | sm_120 emits 64 `mma.sync.kind::mxf4nvf4` ops for the 3D kernel. sm_121 hard-rejects as expected (handled via `TRITON_OVERRIDE_ARCH=sm120`). |
+| 0b | PASS | `index_select` works bit-exactly for both uint8 (0.71 ms for 128→4 rows) and fp8_e4m3fn (0.03 ms) on Blackwell. |
+| 1 | PASS (f491418) | 4 tiny synthetic shapes bit-exact (rel_err = 0.0) vs per-expert 2D loop, 1.83-5.91× raw kernel speedup. |
+| 2 | PASS (f491418) | Gemma decode shapes (E=4, M=1, gate_up 2816→1408 and down 704→2816) bit-exact, 2.55-4.44× speedup. |
+| 3 | PASS (4400fef) | Real-weight bridge test: 4-expert subset via `index_select` from the (128, N, K/2) checkpoint tensors, bit-exact for both gate_up and down. |
+| 4 | PASS (405136c) | Scalar `a_tensor_scale` drifts <2% vs per-expert variant across magnitude skews up to 20×. Well under 5% kill gate — ship scalar-alpha. |
+| 5 | PASS (9b83ba0) | `Gemma4TextExpertsNVFP4.forward` dispatches M=1 → 3D (two kernel launches per MoE layer), M>1 → unchanged prefill loop. Kernel extended with `stride_ae` so the same kernel handles shared-activation (gate_up) and per-expert-activation (down) layouts. |
+| 6 | PASS (20e6505, d6fd8b8) | After fixing a graph-capture regression caused by `os.environ.get` inside `forward` (now resolved at module load): **12.50 tok/s @ 50 tokens, 13.33 tok/s @ 300 tokens** vs 6.77 / 7.07 baselines = **1.80-1.90× speedup**. Output is coherent across 300 tokens (see `parity_check_long.py`). The initial 20% parity divergence was cliff-effect at a 0.125-logit near-tie (`probe_logits_at_divergence.py`); new baselines pinned at 3D path. |
+| 7 | REFLECT | Gain ratio (1.80-1.90×) lands at the top of the projected 1.5-2× band — exactly the expected lever size. Absolute tok/s (13.3) is slightly below the projected 14-18 range, tracking the slightly-lower-than-projected 7-tok/s baseline. **Decision: proceed to additive levers.** 13.3 tok/s is 25% of the 52 tok/s north star; the remaining compounding levers are: CUDA graphs (~2×, requires `cuda_graph_probe.py` to PASS on FP8 first), Path-E on-device alpha (removes CPU syncs), flash_attention_2, TMA scale descriptors. |
+
+**Unexpected finding (Phase 6 diagnosis):** `os.environ.get` inside a torch.compile'd
+forward kills `reduce-overhead` CUDA graph capture. Dropped tok/s from 6.84 → 1.67
+before detection. Fix: resolve env flags at module load into module-level constants.
+See commit 20e6505 — added to memory as a general lesson about torch.compile side-effect purity.

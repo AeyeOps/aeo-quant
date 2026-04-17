@@ -62,9 +62,9 @@ def _nvfp4_matmul_kernel_3d(
     c_ptr,
     alpha,  # fp32 scalar — folded a_tensor_scale * w_tensor_scale
     M, N, K,
-    stride_am, stride_ak,
+    stride_ae, stride_am, stride_ak,
     stride_be, stride_bn, stride_bk,
-    stride_am_scale, stride_ak_scale,
+    stride_ae_scale, stride_am_scale, stride_ak_scale,
     stride_be_scale, stride_bn_scale, stride_bk_scale,
     stride_ce, stride_cm, stride_cn,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
@@ -75,21 +75,26 @@ def _nvfp4_matmul_kernel_3d(
     """Per-expert batched block-scaled NVFP4 matmul.
 
     Same body as :func:`_nvfp4_matmul_kernel` but with an additional
-    ``pid_e`` program axis that offsets the b (weight) and c (output)
-    pointers by one expert's slab. The activation is shared across
-    experts (no pid_e on a pointers).
+    ``pid_e`` program axis that offsets the a, b, and c pointers. The
+    activation offset uses ``stride_ae`` — pass 0 for a shared
+    activation (gate_up decode: all experts see the same token row),
+    or a real stride for per-expert activation (down decode: each
+    expert's own gate*up output).
 
-    Shapes:
-      a:       (M, K/ELEM_PER_BYTE) uint8             — shared across experts
-      b:       (E, N, K/ELEM_PER_BYTE) uint8          — per-expert weights
-      a_scale: (M, K/VEC_SIZE) fp8_e4m3fn
+    Shapes (either case):
+      a:       (E, M, K/ELEM_PER_BYTE) uint8 — or (1, M, K/EPB) expanded
+      b:       (E, N, K/ELEM_PER_BYTE) uint8
+      a_scale: (E, M, K/VEC_SIZE) fp8_e4m3fn
       b_scale: (E, N, K/VEC_SIZE) fp8_e4m3fn
       c:       (E, M, N) bf16
 
     Grid: ``(triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N), E)``.
     Alpha is a scalar — correct when w_tensor_scale is shared across
-    experts (as in our Gemma 4 NVFP4 checkpoint: *_scale_2 is a single
-    scalar per projection).
+    experts (as in the Gemma 4 NVFP4 checkpoint: *_scale_2 is a single
+    scalar per projection). For per-expert activation, the global
+    a_tensor_scale is computed over the whole (E, M, K) tensor; the
+    parity drift vs per-expert quantization is < 2% (validated in
+    examples/test_nvfp4_3d_ab_alpha.py).
     """
     pid_mn = tl.program_id(axis=0)
     pid_e = tl.program_id(axis=1)
@@ -103,6 +108,9 @@ def _nvfp4_matmul_kernel_3d(
     offs_k_packed_base = tl.arange(0, BLOCK_K // ELEM_PER_BYTE)
     offs_k_scale_base = tl.arange(0, BLOCK_K // VEC_SIZE)
 
+    # Expert base offsets (stride_ae = 0 gives shared activation across experts)
+    a_expert_base = a_ptr + pid_e * stride_ae
+    a_scale_expert_base = a_scale_ptr + pid_e * stride_ae_scale
     b_expert_base = b_ptr + pid_e * stride_be
     b_scale_expert_base = b_scale_ptr + pid_e * stride_be_scale
 
@@ -112,13 +120,13 @@ def _nvfp4_matmul_kernel_3d(
         k_packed_start = k_block * (BLOCK_K // ELEM_PER_BYTE)
         k_scale_start = k_block * (BLOCK_K // VEC_SIZE)
 
-        a_ptrs = (a_ptr
+        a_ptrs = (a_expert_base
                   + offs_m[:, None] * stride_am
                   + (k_packed_start + offs_k_packed_base)[None, :] * stride_ak)
         b_ptrs = (b_expert_base
                   + offs_n[:, None] * stride_bn
                   + (k_packed_start + offs_k_packed_base)[None, :] * stride_bk)
-        a_scale_ptrs = (a_scale_ptr
+        a_scale_ptrs = (a_scale_expert_base
                         + offs_m[:, None] * stride_am_scale
                         + (k_scale_start + offs_k_scale_base)[None, :] * stride_ak_scale)
         b_scale_ptrs = (b_scale_expert_base
@@ -438,36 +446,70 @@ def nvfp4_linear_3d_prequantized(
     *,
     out_dtype: torch.dtype = torch.bfloat16,
 ) -> torch.Tensor:
-    """Batched per-expert NVFP4 matmul: E experts share one (M, K) activation.
+    """Batched per-expert NVFP4 matmul for MoE decode.
 
-    Used for Gemma 4 MoE decode where top-k experts are gathered into a
-    dense (k, N, K) slab and run in one kernel launch instead of k
-    separate 2D matmuls.
+    Two activation layouts are supported, distinguished by ``ndim``:
+
+    * **Shared (2D)** — ``a_packed`` shape ``(M, K // 2)``. All E experts
+      multiply against the same activation rows. Used for gate_up in
+      decode where all k experts see the single token's hidden_states.
+    * **Per-expert (3D)** — ``a_packed`` shape ``(E, M, K // 2)``. Each
+      expert multiplies against its own activation slice. Used for
+      down_proj in decode where each expert's gate*up output differs.
 
     Args:
-        a_packed:        (M, K // 2) uint8 — shared across experts.
-        a_block_scale:   (M, K // 16) fp8_e4m3fn.
+        a_packed:        ``(M, K // 2)`` or ``(E, M, K // 2)`` uint8.
+        a_block_scale:   matching shape with ``K // 16`` fp8_e4m3fn.
         a_tensor_scale:  fp32 scalar.
-        w_packed:        (E, N, K // 2) uint8 — per-expert weights.
-        w_block_scale:   (E, N, K // 16) fp8_e4m3fn.
-        w_tensor_scale:  fp32 scalar — shared across experts (matches the
-                         Gemma 4 NVFP4 checkpoint's *_scale_2 layout).
+        w_packed:        ``(E, N, K // 2)`` uint8 — per-expert weights.
+        w_block_scale:   ``(E, N, K // 16)`` fp8_e4m3fn.
+        w_tensor_scale:  fp32 scalar — shared across experts.
         out_dtype:       bf16 (default) or fp32.
 
     Returns:
-        (E, M, N) of ``out_dtype``.
+        ``(E, M, N)`` of ``out_dtype``.
     """
-    if a_packed.ndim != 2:
-        raise ValueError(
-            f"a_packed must be 2D (M, K//2); got shape {tuple(a_packed.shape)}"
-        )
     if w_packed.ndim != 3:
         raise ValueError(
             f"w_packed must be 3D (E, N, K//2); got shape {tuple(w_packed.shape)}"
         )
-
-    M, K_half_a = a_packed.shape
     E, N, K_half_w = w_packed.shape
+
+    # Detect activation layout and canonicalize to 3D (E, M, K/2).
+    if a_packed.ndim == 2:
+        # Shared activation — add a leading E=1 dim via unsqueeze; the
+        # kernel sees stride_ae=0 because the tensor is broadcast-shaped.
+        M, K_half_a = a_packed.shape
+        a_packed_3d = a_packed.unsqueeze(0)
+        a_block_scale_3d = a_block_scale.unsqueeze(0)
+        # Force stride_ae=0 so the kernel reads the same row for every
+        # expert regardless of broadcasting semantics.
+        stride_ae = 0
+        stride_ae_scale = 0
+        stride_am = a_packed_3d.stride(1)
+        stride_ak = a_packed_3d.stride(2)
+        stride_am_scale = a_block_scale_3d.stride(1)
+        stride_ak_scale = a_block_scale_3d.stride(2)
+    elif a_packed.ndim == 3:
+        E_a, M, K_half_a = a_packed.shape
+        if E_a != E:
+            raise ValueError(
+                f"per-expert activation E={E_a} must equal weight E={E}"
+            )
+        stride_ae = a_packed.stride(0)
+        stride_am = a_packed.stride(1)
+        stride_ak = a_packed.stride(2)
+        stride_ae_scale = a_block_scale.stride(0)
+        stride_am_scale = a_block_scale.stride(1)
+        stride_ak_scale = a_block_scale.stride(2)
+        a_packed_3d = a_packed
+        a_block_scale_3d = a_block_scale
+    else:
+        raise ValueError(
+            f"a_packed must be 2D (shared) or 3D (per-expert); "
+            f"got shape {tuple(a_packed.shape)}"
+        )
+
     if K_half_a != K_half_w:
         raise ValueError(
             f"activation K//2={K_half_a} must equal weight K//2={K_half_w}"
@@ -476,7 +518,6 @@ def nvfp4_linear_3d_prequantized(
 
     alpha = (a_tensor_scale.float() * w_tensor_scale.float()).item()
 
-    # Same tile-selection heuristic as the 2D wrapper.
     if M <= 16:
         BLOCK_M = 16
     elif M <= 32:
@@ -501,35 +542,52 @@ def nvfp4_linear_3d_prequantized(
 
     M_padded = ((M + BLOCK_M - 1) // BLOCK_M) * BLOCK_M
     if M_padded != M:
+        # Grow the M axis of the canonicalized 3D activation tensor. For
+        # the shared path the leading dim stays 1 (stride_ae=0 preserved);
+        # for the per-expert path it stays E.
+        pad_E = a_packed_3d.shape[0]
         a_packed_padded = torch.zeros(
-            M_padded, a_packed.shape[1],
-            dtype=a_packed.dtype, device=a_packed.device,
+            pad_E, M_padded, a_packed_3d.shape[2],
+            dtype=a_packed_3d.dtype, device=a_packed_3d.device,
         )
-        a_packed_padded[:M] = a_packed
+        a_packed_padded[:, :M, :] = a_packed_3d
         a_block_scale_padded = torch.zeros(
-            M_padded, a_block_scale.shape[1],
-            dtype=a_block_scale.dtype, device=a_block_scale.device,
+            pad_E, M_padded, a_block_scale_3d.shape[2],
+            dtype=a_block_scale_3d.dtype, device=a_block_scale_3d.device,
         )
-        a_block_scale_padded[:M] = a_block_scale
-        a_packed = a_packed_padded
-        a_block_scale = a_block_scale_padded
+        a_block_scale_padded[:, :M, :] = a_block_scale_3d
+        a_packed_3d = a_packed_padded
+        a_block_scale_3d = a_block_scale_padded
+        # Only update stride_ae/stride_ae_scale if this is the per-expert
+        # path; keep stride_ae=0 for the shared path (the canonicalized
+        # tensor has leading dim 1, so its natural stride(0) would give
+        # the right offset only if we actually want per-expert data).
+        if stride_ae != 0:
+            stride_ae = a_packed_3d.stride(0)
+            stride_ae_scale = a_block_scale_3d.stride(0)
+        stride_am = a_packed_3d.stride(1)
+        stride_ak = a_packed_3d.stride(2)
+        stride_am_scale = a_block_scale_3d.stride(1)
+        stride_ak_scale = a_block_scale_3d.stride(2)
         c_padded = torch.empty(
-            (E, M_padded, N), dtype=out_dtype, device=a_packed.device,
+            (E, M_padded, N), dtype=out_dtype, device=a_packed_3d.device,
         )
     else:
-        c_padded = torch.empty((E, M, N), dtype=out_dtype, device=a_packed.device)
+        c_padded = torch.empty(
+            (E, M, N), dtype=out_dtype, device=a_packed_3d.device,
+        )
 
     grid = (triton.cdiv(M_padded, BLOCK_M) * triton.cdiv(N, BLOCK_N), E)
 
     _nvfp4_matmul_kernel_3d[grid](
-        a_packed, w_packed,
-        a_block_scale, w_block_scale,
+        a_packed_3d, w_packed,
+        a_block_scale_3d, w_block_scale,
         c_padded,
         alpha,
         M_padded, N, K,
-        a_packed.stride(0), a_packed.stride(1),
+        stride_ae, stride_am, stride_ak,
         w_packed.stride(0), w_packed.stride(1), w_packed.stride(2),
-        a_block_scale.stride(0), a_block_scale.stride(1),
+        stride_ae_scale, stride_am_scale, stride_ak_scale,
         w_block_scale.stride(0), w_block_scale.stride(1), w_block_scale.stride(2),
         c_padded.stride(0), c_padded.stride(1), c_padded.stride(2),
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,

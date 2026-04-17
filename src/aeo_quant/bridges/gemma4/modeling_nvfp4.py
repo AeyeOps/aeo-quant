@@ -109,9 +109,80 @@ class Gemma4TextExpertsNVFP4(Gemma4TextExperts):
     def forward(self, hidden_states, top_k_index, top_k_weights):
         """Native NVFP4 expert forward.
 
-        Routes each selected expert's gate_up_proj and down_proj through
-        :func:`nvfp4_linear`.  Mirrors the dispatch and combine logic of
-        :class:`Gemma4TextExpertsFP8.forward`.
+        Dispatches to a decode-fast 3D-batched path at M=1 (single
+        token), or to the per-expert 2D loop at prefill. Both paths are
+        functionally equivalent; the 3D path reduces launch count by k×
+        (one kernel per projection instead of one per expert per
+        projection).
+        """
+        if hidden_states.shape[0] == 1:
+            return self._forward_decode_3d(
+                hidden_states, top_k_index, top_k_weights,
+            )
+        return self._forward_prefill(
+            hidden_states, top_k_index, top_k_weights,
+        )
+
+    def _forward_decode_3d(self, hidden_states, top_k_index, top_k_weights):
+        """M=1 decode path using the 3D batched NVFP4 kernel.
+
+        gate_up: shared activation (1, hidden) across k experts → one
+        kernel launch producing (k, 1, 2*im).
+        down:    per-expert activation (k, im) → one kernel launch
+        producing (k, 1, hidden).
+
+        Combine applies top_k_weights and sums along the k axis.
+        """
+        from aeo_quant.gpu.nvfp4_matmul import nvfp4_linear_3d_prequantized
+        from aeo_quant.gpu.quant import quantize_2d_to_nvfp4
+
+        # (1, top_k) → (top_k,). For M=1 there is exactly one row of
+        # routing information; we operate on it directly rather than
+        # building the full expert_mask / expert_hit scaffolding.
+        expert_ids = top_k_index[0]  # (top_k,)
+
+        with _moe_range("nvfp4_moe_3d_prequant_hidden"):
+            h_packed, h_block_scale, h_tensor_scale = quantize_2d_to_nvfp4(
+                hidden_states,
+            )
+
+        with _moe_range("nvfp4_moe_3d_gate_up"):
+            w_gu_packed = self.gate_up_proj.index_select(0, expert_ids)
+            w_gu_bs = self.gate_up_proj_scale.index_select(0, expert_ids)
+            gate_up = nvfp4_linear_3d_prequantized(
+                h_packed, h_block_scale, h_tensor_scale,
+                w_gu_packed, w_gu_bs, self.gate_up_proj_scale_2,
+            )  # (k, 1, 2*im)
+            gate, up = gate_up.chunk(2, dim=-1)
+            current = self.act_fn(gate) * up  # (k, 1, im)
+
+        with _moe_range("nvfp4_moe_3d_prequant_down"):
+            # (k, 1, im) → (k, im) for quantize_2d; then unsqueeze to
+            # (k, 1, im//2) per-expert activation layout for the kernel.
+            current_2d = current.squeeze(1)
+            d_packed_2d, d_block_scale_2d, d_tensor_scale = quantize_2d_to_nvfp4(
+                current_2d,
+            )
+            d_packed = d_packed_2d.unsqueeze(1)          # (k, 1, im//2)
+            d_block_scale = d_block_scale_2d.unsqueeze(1)  # (k, 1, im//16)
+
+        with _moe_range("nvfp4_moe_3d_down"):
+            w_d_packed = self.down_proj.index_select(0, expert_ids)
+            w_d_bs = self.down_proj_scale.index_select(0, expert_ids)
+            down_out = nvfp4_linear_3d_prequantized(
+                d_packed, d_block_scale, d_tensor_scale,
+                w_d_packed, w_d_bs, self.down_proj_scale_2,
+            )  # (k, 1, hidden)
+
+        with _moe_range("nvfp4_moe_3d_combine"):
+            # top_k_weights: (1, k) → (k, 1, 1) to broadcast over down_out.
+            weights = top_k_weights[0, :, None, None]
+            out = (down_out * weights).sum(dim=0)  # (1, hidden)
+
+        return out.to(hidden_states.dtype)
+
+    def _forward_prefill(self, hidden_states, top_k_index, top_k_weights):
+        """Per-expert 2D path used for prefill (M > 1).
 
         Optimization: the full ``hidden_states`` is quantized once
         up-front, and each expert slices the packed form rather than
@@ -119,17 +190,12 @@ class Gemma4TextExpertsNVFP4(Gemma4TextExperts):
         activation-quant passes per layer per token — with 10+ small
         elementwise launches each, meaningful in the decode path.
         """
-        # Lazy imports so the load-only path (no native inference) doesn't
-        # need Triton at import time.
         from aeo_quant.gpu.nvfp4_matmul import (
             nvfp4_linear,
             nvfp4_linear_prequantized,
         )
         from aeo_quant.gpu.quant import quantize_2d_to_nvfp4
 
-        # Pre-quantize hidden_states once (reused across every selected
-        # expert's gate_up_proj).  Per-expert token slicing then works
-        # on the packed form without any more activation-quant work.
         with _moe_range("nvfp4_moe_prequant"):
             h_packed, h_block_scale, h_tensor_scale = quantize_2d_to_nvfp4(
                 hidden_states

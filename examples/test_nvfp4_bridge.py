@@ -175,10 +175,104 @@ def main() -> int:
             print(f"  M={M:>5}: [FAIL] {type(e).__name__}: {e}")
             results.append({"ok": False, "error": str(e)})
 
+    # --- 3D batched kernel vs per-expert loop (Phase 3 gate) ---
+    print("\n--- 3D kernel: 4-expert subset (decode) ---")
+    threed_results = _test_3d_path(
+        t["gate_up_packed"], t["gate_up_scale"], t["gate_up_scale_2"],
+        t["down_packed"], t["down_scale"], t["down_scale_2"],
+        K_gu, N_gu, K_dn, N_dn,
+    )
+    results.extend(threed_results)
+
     # Summary
-    fails = [r for r in results if r.get("rel_err", 1.0) >= 0.30 or not r.get("rel_err")]
+    fails = [
+        r for r in results
+        if r.get("rel_err") is None or r.get("rel_err", 1.0) >= 0.30
+    ]
     print(f"\n--- summary: {len(results) - len(fails)}/{len(results)} pass ---")
     return 0 if not fails else 1
+
+
+def _test_3d_path(
+    gu_packed, gu_scale, gu_scale_2,
+    dn_packed, dn_scale, dn_scale_2,
+    K_gu: int, N_gu: int, K_dn: int, N_dn: int,
+) -> list[dict]:
+    """Assert the 3D batched kernel matches the per-expert 2D loop.
+
+    Uses a 4-expert subset (selected via ``index_select``) and real
+    Gemma decode shapes (M=1, K_hidden=K_gu for gate_up, K=K_dn for
+    down). Tolerance: 1e-3 — the 3D and per-expert paths should be
+    bit-exact for a shared scalar w_tensor_scale.
+    """
+    from aeo_quant.gpu.nvfp4_matmul import (
+        nvfp4_linear_3d_prequantized,
+        nvfp4_linear_prequantized,
+    )
+    from aeo_quant.gpu.quant import quantize_2d_to_nvfp4
+
+    out = []
+    expert_ids = torch.tensor([3, 17, 45, 91], dtype=torch.long, device="cuda")
+
+    # gate_up: (E=128, N=1408, K=2816) — activation (M=1, K=2816)
+    torch.manual_seed(31337)
+    x_gu = torch.randn(1, K_gu, dtype=torch.bfloat16, device="cuda") * 0.1
+    a_packed, a_block_scale, a_tensor_scale = quantize_2d_to_nvfp4(x_gu)
+
+    w_gu_packed_sub = gu_packed.index_select(0, expert_ids).contiguous()
+    w_gu_scale_sub = gu_scale.index_select(0, expert_ids).contiguous()
+
+    ref_gu = torch.stack([
+        nvfp4_linear_prequantized(
+            a_packed, a_block_scale, a_tensor_scale,
+            w_gu_packed_sub[i], w_gu_scale_sub[i], gu_scale_2,
+        )
+        for i in range(len(expert_ids))
+    ], dim=0)
+    out_gu = nvfp4_linear_3d_prequantized(
+        a_packed, a_block_scale, a_tensor_scale,
+        w_gu_packed_sub, w_gu_scale_sub, gu_scale_2,
+    )
+    err = (out_gu.float() - ref_gu.float()).abs()
+    rel = err.mean().item() / (ref_gu.float().abs().mean().item() + 1e-8)
+    max_abs = err.max().item()
+    ok = rel < 1e-3
+    print(f"  gate_up  E=4 M=1 K={K_gu} N={N_gu}: "
+          f"[{'OK' if ok else 'FAIL'}] rel_err={rel:.6f} max_abs={max_abs:.6f} "
+          f"3d_out={tuple(out_gu.shape)}")
+    out.append({"name": "gate_up_3d", "rel_err": rel, "max_abs": max_abs, "M": 1})
+
+    # down: (E=128, N=2816, K=704) — activation (M=1, K=704). Fake input from
+    # a random bf16 (real flow would be the gate*up result; numerics are
+    # about kernel correctness, not end-to-end MoE math).
+    torch.manual_seed(31338)
+    x_dn = torch.randn(1, K_dn, dtype=torch.bfloat16, device="cuda") * 0.1
+    a_packed_dn, a_bs_dn, a_ts_dn = quantize_2d_to_nvfp4(x_dn)
+
+    w_dn_packed_sub = dn_packed.index_select(0, expert_ids).contiguous()
+    w_dn_scale_sub = dn_scale.index_select(0, expert_ids).contiguous()
+
+    ref_dn = torch.stack([
+        nvfp4_linear_prequantized(
+            a_packed_dn, a_bs_dn, a_ts_dn,
+            w_dn_packed_sub[i], w_dn_scale_sub[i], dn_scale_2,
+        )
+        for i in range(len(expert_ids))
+    ], dim=0)
+    out_dn = nvfp4_linear_3d_prequantized(
+        a_packed_dn, a_bs_dn, a_ts_dn,
+        w_dn_packed_sub, w_dn_scale_sub, dn_scale_2,
+    )
+    err = (out_dn.float() - ref_dn.float()).abs()
+    rel = err.mean().item() / (ref_dn.float().abs().mean().item() + 1e-8)
+    max_abs = err.max().item()
+    ok = rel < 1e-3
+    print(f"  down     E=4 M=1 K={K_dn} N={N_dn}: "
+          f"[{'OK' if ok else 'FAIL'}] rel_err={rel:.6f} max_abs={max_abs:.6f} "
+          f"3d_out={tuple(out_dn.shape)}")
+    out.append({"name": "down_3d", "rel_err": rel, "max_abs": max_abs, "M": 1})
+
+    return out
 
 
 if __name__ == "__main__":

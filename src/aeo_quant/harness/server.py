@@ -205,6 +205,8 @@ async def _worker(state: ServerState) -> None:
                 job.result = {"status": STATUS_ERROR, "error": f"bad kwargs: {e}"}
                 continue
             except Exception as e:
+                import traceback as _tb
+                _tb.print_exc()
                 job.result = {
                     "status": STATUS_ERROR,
                     "error": f"workload {name!r} raised: {type(e).__name__}: {e}",

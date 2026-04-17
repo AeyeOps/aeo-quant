@@ -61,7 +61,16 @@ class TurboQuantSlidingLayer(TurboQuantLayer):
         # touched — they already carry the pre-trim view (length
         # ``window - 1 + query_length`` when steady-state full) that matches
         # ``get_mask_sizes(query_length)`` below.
-        if self._key_indices is not None and self._key_indices.shape[-2] > self._compressed_cap:
+        #
+        # ``_key_indices`` is a 1-D empty placeholder from lazy_initialization
+        # until the first overflow-quantize pass turns it 4-D, so gate on
+        # ``numel() > 0`` (the same check the parent uses at cache.py:108)
+        # before touching ``shape[-2]``.
+        if (
+            self._key_indices is not None
+            and self._key_indices.numel() > 0
+            and self._key_indices.shape[-2] > self._compressed_cap
+        ):
             cap = self._compressed_cap
             self._key_indices = self._key_indices[..., -cap:, :].contiguous()
             self._key_norms = self._key_norms[..., -cap:, :].contiguous()

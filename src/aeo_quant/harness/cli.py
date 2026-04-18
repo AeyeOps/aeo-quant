@@ -1,6 +1,11 @@
 """Command-line interface for the aeo-quant harness.
 
-    aeo-harness start [--format fp8|nvfp4]   # foreground; loads model, listens
+    aeo-harness start [--format fp8|nvfp4] [--foreground]
+                                              # detach by default; streams
+                                              # the daemon's load log until
+                                              # ready. --foreground runs the
+                                              # server loop inline (for
+                                              # supervisors / debugging).
     aeo-harness status                        # connect and print server state
     aeo-harness stop                          # connect and ask server to exit
 
@@ -14,17 +19,43 @@ import json
 import os
 import sys
 
-from .client import HarnessClient, HarnessError, HarnessUnavailable, try_connect
+from .client import (
+    HarnessClient,
+    HarnessError,
+    HarnessUnavailable,
+    spawn_and_wait_for_ready,
+    try_connect,
+)
 from .protocol import SOCKET_PATH
 
 
 def _cmd_start(args: argparse.Namespace) -> int:
-    # Import lazily — starting the server pulls torch/transformers.
     if args.format:
         os.environ["QUANT_FORMAT"] = args.format
-    from .server import run_server
 
-    return run_server()
+    if args.foreground:
+        # Import lazily — starting the server pulls torch/transformers.
+        from .server import run_server
+        return run_server()
+
+    # Default: detach a background daemon, tail its log until ready, return.
+    if try_connect() is not None:
+        print(
+            f"[harness] already running on {SOCKET_PATH}; "
+            f"use `aeo-harness stop` first to restart.",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        spawn_and_wait_for_ready(preflight_label="aeo_harness_start")
+    except HarnessUnavailable as e:
+        print(f"[harness] failed to start: {e}", file=sys.stderr)
+        return 1
+    print(
+        "[harness] detached daemon running in the background. "
+        "Stop with `aeo-harness stop`.",
+    )
+    return 0
 
 
 def _cmd_status(_args: argparse.Namespace) -> int:
@@ -64,12 +95,17 @@ def main() -> int:
 
     p_start = sub.add_parser(
         "start",
-        help="load model and serve in the foreground (Ctrl+C or "
-             "`aeo-harness stop` from another shell to exit)",
+        help="launch the harness daemon (detached by default; "
+             "use --foreground to run inline)",
     )
     p_start.add_argument(
         "--format", choices=["fp8", "nvfp4"],
         help="override QUANT_FORMAT for this run",
+    )
+    p_start.add_argument(
+        "--foreground", action="store_true",
+        help="run the server loop inline in this terminal "
+             "(for supervisors / debugging); default is to detach",
     )
     p_start.set_defaults(func=_cmd_start)
 

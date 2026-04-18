@@ -182,12 +182,17 @@ def _spawn_detached_daemon() -> subprocess.Popen:
     Uses ``start_new_session`` so the child survives the parent's exit.
     Passes ``-u`` so the child's stdout is unbuffered — otherwise tail-to-
     terminal would see nothing until the daemon's buffers flushed.
+
+    The child invocation passes ``--foreground`` because the child *is* the
+    detached daemon — it runs the server loop directly rather than
+    re-detaching and looping forever.
     """
     HARNESS_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     log_fh = open(HARNESS_LOG_PATH, "ab")  # noqa: SIM115 — passed to child
     try:
         proc = subprocess.Popen(
-            [sys.executable, "-u", "-m", "aeo_quant.harness.cli", "start"],
+            [sys.executable, "-u", "-m", "aeo_quant.harness.cli",
+             "start", "--foreground"],
             stdout=log_fh,
             stderr=log_fh,
             stdin=subprocess.DEVNULL,
@@ -198,6 +203,81 @@ def _spawn_detached_daemon() -> subprocess.Popen:
     finally:
         log_fh.close()
     return proc
+
+
+def spawn_and_wait_for_ready(
+    *,
+    preflight_min_free_gb: float | None = None,
+    preflight_label: str = "harness_spawn",
+    wait_s: float = 300.0,
+    verbose: bool = True,
+) -> HarnessClient:
+    """Detach the daemon, tail its startup log, and return a connected client.
+
+    Used by both ``get_or_start_harness`` (auto-spawn when a client finds no
+    running daemon) and the ``aeo-harness start`` CLI (explicit user-invoked
+    spawn). Handles preflight, log tail, readiness polling, and timeout.
+
+    Raises ``HarnessUnavailable`` if the daemon doesn't come up within
+    ``wait_s`` seconds, or if it exits during startup.
+    """
+    if preflight_min_free_gb is None:
+        preflight_min_free_gb = float(os.environ.get("HARNESS_MIN_FREE_GB", "60"))
+    from aeo_quant.gpu.memory import preflight_memory
+    preflight_memory(preflight_min_free_gb, label=preflight_label)
+
+    start_pos = HARNESS_LOG_PATH.stat().st_size if HARNESS_LOG_PATH.exists() else 0
+
+    if verbose:
+        print(
+            "[harness] spawning detached background process", flush=True,
+        )
+        print(f"[harness] log: {HARNESS_LOG_PATH}", flush=True)
+    proc = _spawn_detached_daemon()
+    if verbose:
+        print(
+            f"[harness] daemon PID {proc.pid} — streaming startup output below "
+            f"(timeout {wait_s:.0f}s):",
+            flush=True,
+        )
+
+    stop_tail = threading.Event()
+    tail_thread: threading.Thread | None = None
+    if verbose:
+        tail_thread = threading.Thread(
+            target=_tail_log_to_stdout,
+            args=(start_pos, stop_tail),
+            name="harness-log-tail",
+            daemon=True,
+        )
+        tail_thread.start()
+
+    try:
+        deadline = time.monotonic() + wait_s
+        while True:
+            if time.monotonic() >= deadline:
+                raise HarnessUnavailable(
+                    f"daemon did not become ready within {wait_s:.0f}s; "
+                    f"check {HARNESS_LOG_PATH}"
+                )
+            rc = proc.poll()
+            if rc is not None:
+                raise HarnessUnavailable(
+                    f"daemon exited with code {rc} before becoming ready; "
+                    f"check {HARNESS_LOG_PATH}"
+                )
+            client = try_connect(connect_timeout=0.5)
+            if client is not None:
+                time.sleep(0.3)
+                if verbose:
+                    elapsed = wait_s - (deadline - time.monotonic())
+                    print(f"\n[harness] daemon ready after {elapsed:.1f}s", flush=True)
+                return client
+            time.sleep(1.0)
+    finally:
+        stop_tail.set()
+        if tail_thread is not None:
+            tail_thread.join(timeout=1.0)
 
 
 def _tail_log_to_stdout(
@@ -282,65 +362,11 @@ def get_or_start_harness(
     client = try_connect()
     if client is not None:
         return client
-
-    if preflight_min_free_gb is None:
-        preflight_min_free_gb = float(os.environ.get("HARNESS_MIN_FREE_GB", "60"))
-    from aeo_quant.gpu.memory import preflight_memory
-    preflight_memory(preflight_min_free_gb, label=preflight_label)
-
-    # Remember where the log ends before spawn so we only tail NEW content,
-    # not whatever an earlier daemon wrote.
-    start_pos = HARNESS_LOG_PATH.stat().st_size if HARNESS_LOG_PATH.exists() else 0
-
     if verbose:
-        print(
-            "[harness] no daemon running — spawning detached background process",
-            flush=True,
-        )
-        print(f"[harness] log: {HARNESS_LOG_PATH}", flush=True)
-    proc = _spawn_detached_daemon()
-    if verbose:
-        print(
-            f"[harness] daemon PID {proc.pid} — streaming startup output below "
-            f"(timeout {wait_s:.0f}s):",
-            flush=True,
-        )
-
-    stop_tail = threading.Event()
-    tail_thread: threading.Thread | None = None
-    if verbose:
-        tail_thread = threading.Thread(
-            target=_tail_log_to_stdout,
-            args=(start_pos, stop_tail),
-            name="harness-log-tail",
-            daemon=True,
-        )
-        tail_thread.start()
-
-    try:
-        deadline = time.monotonic() + wait_s
-        while True:
-            if time.monotonic() >= deadline:
-                raise HarnessUnavailable(
-                    f"daemon did not become ready within {wait_s:.0f}s; "
-                    f"check {HARNESS_LOG_PATH}"
-                )
-            rc = proc.poll()
-            if rc is not None:
-                raise HarnessUnavailable(
-                    f"daemon exited with code {rc} before becoming ready; "
-                    f"check {HARNESS_LOG_PATH}"
-                )
-            client = try_connect(connect_timeout=0.5)
-            if client is not None:
-                # Give the tail one more beat to flush the last log lines.
-                time.sleep(0.3)
-                if verbose:
-                    elapsed = wait_s - (deadline - time.monotonic())
-                    print(f"\n[harness] daemon ready after {elapsed:.1f}s", flush=True)
-                return client
-            time.sleep(1.0)
-    finally:
-        stop_tail.set()
-        if tail_thread is not None:
-            tail_thread.join(timeout=1.0)
+        print("[harness] no daemon running", flush=True)
+    return spawn_and_wait_for_ready(
+        preflight_min_free_gb=preflight_min_free_gb,
+        preflight_label=preflight_label,
+        wait_s=wait_s,
+        verbose=verbose,
+    )

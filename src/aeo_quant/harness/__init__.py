@@ -9,6 +9,18 @@ Start: ``aeo-harness start --format {fp8|nvfp4}``
 Stop:  ``aeo-harness stop``
 """
 
-from .client import HarnessClient, HarnessUnavailable, get_or_start_harness, try_connect
+from .client import (
+    HarnessClient,
+    HarnessUnavailable,
+    get_or_start_harness,
+    spawn_and_wait_for_ready,
+    try_connect,
+)
 
-__all__ = ["HarnessClient", "HarnessUnavailable", "get_or_start_harness", "try_connect"]
+__all__ = [
+    "HarnessClient",
+    "HarnessUnavailable",
+    "get_or_start_harness",
+    "spawn_and_wait_for_ready",
+    "try_connect",
+]

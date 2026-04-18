@@ -2,6 +2,41 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.12] - 2026-04-18
+
+### Changed
+
+- **NVFP4 matmul launchers no longer call `.item()` on the fused alpha
+  scalar.** Both `nvfp4_linear_prequantized` (2D prefill path) and
+  `nvfp4_linear_3d_prequantized` (3D decode path) now pass the fused
+  `a_tensor_scale * w_tensor_scale` as a 0-D device tensor, and the two
+  Triton kernels (`_nvfp4_matmul_kernel`, `_nvfp4_matmul_kernel_3d`) load
+  it via `tl.load(alpha_ptr)` in the epilogue before the bf16 down-cast.
+  Arithmetic is bit-identical (same fp32 multiply, just on device); parity
+  check passes byte-for-byte vs the prior `.item()` launcher. The change
+  removes one forced host sync per expert matmul — on Gemma 4 decode
+  that's dozens of cudaStreamSynchronize calls per token — and makes the
+  decode path compatible with `torch.cuda.CUDAGraph` capture, which
+  disallows host syncs mid-capture.
+- **`_FP4_BOUNDS` and `_FP4_LUT` are cached per device.** The activation
+  quantization path (`quantize_2d_to_nvfp4` → `_round_to_fp4_e2m1`) was
+  doing `_FP4_BOUNDS.to(mag.device)` on every call — a CPU→GPU copy on
+  every decode step, and also a CUDA-graph-capture blocker (unpinned
+  host→device copies aren't legal mid-capture). Replaced with lazy
+  per-device caches keyed on `str(device)`. First use on a device
+  populates the cache; subsequent calls return the GPU-resident tensor
+  directly. No behavior change under eager; unblocks graph capture.
+
+### Performance
+
+- Decode throughput on NVFP4 + `Gemma4HybridTurboQuantCache` improves
+  from the prior ~12.5–13.7 tok/s band to ~15.8 tok/s on the standard
+  parity prompt (GB10 sm_121). The improvement comes entirely from the
+  eliminated per-step host sync (alpha `.item()`) and the eliminated
+  per-step CPU→GPU copy (`_FP4_BOUNDS`). Both are independently correct
+  under eager execution — CUDA graph compatibility is a forward-looking
+  co-benefit of the same fixes.
+
 ## [0.1.11] - 2026-04-17
 
 ### Added

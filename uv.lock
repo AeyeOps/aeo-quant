@@ -22,7 +22,7 @@ wheels = [
 
 [[package]]
 name = "aeo-quant"
-version = "0.1.10"
+version = "0.1.12"
 source = { editable = "." }
 dependencies = [
     { name = "torchao" },

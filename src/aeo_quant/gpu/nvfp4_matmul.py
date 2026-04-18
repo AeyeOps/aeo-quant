@@ -54,7 +54,7 @@ def _nvfp4_matmul_kernel_3d(
     a_ptr, b_ptr,
     a_scale_ptr, b_scale_ptr,
     c_ptr,
-    alpha,  # fp32 scalar — folded a_tensor_scale * w_tensor_scale
+    alpha_ptr,  # fp32 pointer — folded a_tensor_scale * w_tensor_scale, loaded in-kernel
     M, N, K,
     stride_ae, stride_am, stride_ak,
     stride_be, stride_bn, stride_bk,
@@ -135,6 +135,7 @@ def _nvfp4_matmul_kernel_3d(
 
         acc = tl.dot_scaled(a, a_scale, "e2m1", b.T, b_scale, "e2m1", acc)
 
+    alpha = tl.load(alpha_ptr)
     acc = acc * alpha
 
     c_ptrs = (c_ptr
@@ -150,7 +151,7 @@ def _nvfp4_matmul_kernel(
     a_ptr, b_ptr,
     a_scale_ptr, b_scale_ptr,
     c_ptr,
-    alpha,  # fp32 scalar — folded a_tensor_scale * b_tensor_scale
+    alpha_ptr,  # fp32 pointer — folded a_tensor_scale * b_tensor_scale, loaded in-kernel
     M, N, K,
     stride_am, stride_ak,
     stride_bn, stride_bk,
@@ -221,7 +222,10 @@ def _nvfp4_matmul_kernel(
 
         acc = tl.dot_scaled(a, a_scale, "e2m1", b.T, b_scale, "e2m1", acc)
 
-    # Level-2 per-tensor scale folded here (Option B epilogue)
+    # Level-2 per-tensor scale folded here (Option B epilogue). Loaded
+    # from device memory so the Python launcher doesn't need .item() —
+    # that host sync would break CUDA graph capture.
+    alpha = tl.load(alpha_ptr)
     acc = acc * alpha
 
     c_ptrs = (c_ptr
@@ -337,8 +341,10 @@ def nvfp4_linear_prequantized(
     K = K_half * 2
     N = w_packed.shape[0]
 
-    # Fold the two tensor scales into a single epilogue fmul.
-    alpha = (a_tensor_scale.float() * w_tensor_scale.float()).item()
+    # Fold the two tensor scales into a single epilogue fmul. Kept as a
+    # 0-D device tensor rather than a Python float (.item() would force
+    # a host sync per matmul, making the kernel launch uncapturable).
+    alpha = (a_tensor_scale.float() * w_tensor_scale.float())
 
     c = torch.empty((M, N), dtype=out_dtype, device=a_packed.device)
 
@@ -507,7 +513,8 @@ def nvfp4_linear_3d_prequantized(
         )
     K = K_half_a * 2
 
-    alpha = (a_tensor_scale.float() * w_tensor_scale.float()).item()
+    # 0-D device tensor (see the 2D launcher for why we don't .item() it).
+    alpha = (a_tensor_scale.float() * w_tensor_scale.float())
 
     if M <= 16:
         BLOCK_M = 16

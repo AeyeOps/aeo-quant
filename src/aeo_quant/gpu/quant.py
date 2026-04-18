@@ -26,6 +26,27 @@ _FP4_LUT = torch.tensor([
     -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,  # nibbles 8-15 (negative)
 ])
 
+# Per-device caches of the bounds/LUT tensors. Host→device copies at call
+# time would (a) waste ~10µs each on a cudaMemcpy and (b) make the quant
+# path uncapturable in a CUDA graph, which disallows unpinned host copies
+# mid-capture. Populated lazily on first use per device.
+_FP4_BOUNDS_ON_DEVICE: dict[str, torch.Tensor] = {}
+_FP4_LUT_ON_DEVICE: dict[str, torch.Tensor] = {}
+
+
+def _fp4_bounds_for(device: torch.device) -> torch.Tensor:
+    key = str(device)
+    if key not in _FP4_BOUNDS_ON_DEVICE:
+        _FP4_BOUNDS_ON_DEVICE[key] = _FP4_BOUNDS.to(device)
+    return _FP4_BOUNDS_ON_DEVICE[key]
+
+
+def _fp4_lut_for(device: torch.device) -> torch.Tensor:
+    key = str(device)
+    if key not in _FP4_LUT_ON_DEVICE:
+        _FP4_LUT_ON_DEVICE[key] = _FP4_LUT.to(device)
+    return _FP4_LUT_ON_DEVICE[key]
+
 
 def quantize_3d_to_fp8(weight_bf16: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Per-(expert, output_channel) max-abs FP8 quant of a 3D MoE weight tensor.
@@ -105,13 +126,13 @@ def _round_to_fp4_e2m1(x: torch.Tensor) -> torch.Tensor:
     """
     sign = (x < 0).to(torch.uint8) << 3
     mag = x.abs()
-    idx = torch.searchsorted(_FP4_BOUNDS.to(mag.device), mag)  # 0..7
+    idx = torch.searchsorted(_fp4_bounds_for(mag.device), mag)  # 0..7
     return sign | idx.to(torch.uint8)
 
 
 def _nibble_to_fp4(nibbles: torch.Tensor) -> torch.Tensor:
     """Convert uint8 nibbles (0-15) to FP4 E2M1 float values via lookup."""
-    return _FP4_LUT.to(nibbles.device)[nibbles.long()]
+    return _fp4_lut_for(nibbles.device)[nibbles.long()]
 
 
 def quantize_3d_to_nvfp4(

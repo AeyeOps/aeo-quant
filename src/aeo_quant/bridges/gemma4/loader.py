@@ -15,8 +15,7 @@ wraps with ``torch.compile``. Inference routes through our Triton
 ``tl.dot_scaled`` kernel (``_nvfp4_matmul_kernel_3d`` for decode,
 ``_nvfp4_matmul_kernel`` for prefill). Requires
 ``TRITON_OVERRIDE_ARCH=sm120`` on sm_121 (GB10) so the kernel lowers
-to ``mma.sync...kind::mxf4nvf4`` instead of decomposition — see
-``kb/nvfp4-blackwell-research.md``.
+to ``mma.sync...kind::mxf4nvf4`` instead of decomposition.
 """
 from __future__ import annotations
 
@@ -120,8 +119,7 @@ def load_gemma4_nvfp4(model_id_or_path, **from_pretrained_kwargs):
     (decode), both backed by Triton ``tl.dot_scaled``.
 
     ``TRITON_OVERRIDE_ARCH=sm120`` is required on sm_121 (GB10) — without
-    it the kernel falls through to a slow scaled-dot decomposition. See
-    ``kb/nvfp4-blackwell-research.md`` for the lowering-pattern background.
+    it the kernel falls through to a slow scaled-dot decomposition.
     """
     import time
 

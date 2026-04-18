@@ -20,7 +20,7 @@ Required env var for GB10 (sm_121)::
 
 Without this, Triton's ``ScaledBlockedToMMA`` MLIR pattern hard-rejects
 the compute capability and ``tl.dot_scaled`` falls through to a slow
-decomposition. See ``kb/nvfp4-blackwell-research.md`` "second deep dive".
+decomposition.
 """
 from __future__ import annotations
 

@@ -28,6 +28,9 @@ results/
 # Local tooling (session state, agent scratch, etc.)
 .claude/
 
+# Scratch / agent throwaway scripts — see tmp/CLAUDE.md
+tmp/
+
 # Parity baselines (generated locally)
 tests/fixtures/parity_baseline*.txt
 tests/fixtures/parity_long_baseline*.txt

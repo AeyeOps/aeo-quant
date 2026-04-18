@@ -4,8 +4,8 @@ Runs a list of PromptSpec entries through greedy decode with a TurboQuant KV
 cache, returning per-prompt token ids and decoded text so the client can write
 per-prompt output files, diff against baselines, and establish new baselines.
 
-Pure compute — no filesystem I/O. Filesystem writes (output files, timing.json,
-baseline establishment) live in ``examples/reasoning_check.py``.
+Pure compute — no filesystem I/O. Output files, timing captures, and
+baseline establishment are the caller's responsibility.
 
 PromptSpec shape: ``{"name": str, "file": str, "system": str, "user": str}``.
 The ``file`` field is the per-prompt output filename that travels through the

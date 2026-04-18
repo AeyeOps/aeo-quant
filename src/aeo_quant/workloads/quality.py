@@ -1,9 +1,9 @@
 """Quality workload: fire a list of [label, prompt] pairs through greedy decode.
 
 Returns per-prompt token ids, decoded text, and timing. Coherence checks and
-tok/s thresholds are **not** applied here — those are pure post-processing and
-run on the client in ``examples/quality_check.py``. Keeping the workload free
-of pass/fail semantics lets future callers reuse it with different thresholds.
+tok/s thresholds are **not** applied here — those are pure post-processing
+handled by the caller. Keeping the workload free of pass/fail semantics lets
+callers reuse it with different thresholds.
 
 Prompts arrive over the JSON wire protocol as lists (tuples coerce to lists in
 transit); the annotation uses ``list[list[str]]`` to reflect what the workload

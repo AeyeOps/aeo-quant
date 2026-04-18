@@ -2,6 +2,78 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.11] - 2026-04-17
+
+### Added
+
+- **Root `CLAUDE.md`** codifying the architectural rule: `src/` is the SDK,
+  and references go outside → in only. Core code must not reference
+  `examples/`, `tests/`, `tmp/`, `docs/`, `kb/`, or `tools/` in imports,
+  docstrings, or comments — anything outside `src/` may not exist in the
+  future, and a lying comment is worse than a missing one. Includes the
+  repo directory map and the operating principles accumulated this
+  session (shrink tracked surface before polishing references; iteration
+  artifacts are not tests; no test-harness ambitions while the design
+  evolves; historical documents stay historical).
+- **`examples/CLAUDE.md`** — `examples/` is product surface that ships
+  with the SDK, not a scratchpad. Defines the inclusion bar
+  (format-agnostic, harness-based, documented in README) and names the
+  alternatives (`tmp/` for throwaways, `tests/` for regression harnesses
+  when we build them).
+- **`tmp/CLAUDE.md`** + gitignored `tmp/` directory — explicit scratch
+  space for iteration artifacts. Not tracked, not maintained, not
+  referenced from any tracked document or `src/` comment. When a script
+  "solves a problem in a moment," that's what it is — a moment.
+
+### Changed
+
+- **`quant_env()` auto-applies the nvfp4 Triton arch coercion.** When
+  `QUANT_FORMAT=nvfp4` resolves, `ensure_nvfp4_triton_arch()` sets
+  `TRITON_OVERRIDE_ARCH=sm120` via `os.environ.setdefault`, preserving any
+  explicit user pin (e.g. for benchmarking the fallback path). Every
+  entry point that goes through `quant_env()` — harness daemon, all
+  SDK examples — now "just works" on sm_121 (GB10) without the user
+  remembering the sm_120 lowering quirk. The `[nvfp4] WARNING: ...`
+  print at load time is gone; the previously required
+  `TRITON_OVERRIDE_ARCH=sm120 uv run ...` prefix has been stripped from
+  example docstrings.
+
+### Removed
+
+- **`src/aeo_quant/gpu/kernel_probe.py`** — 230-line subprocess runner
+  for probe scripts that had zero callers inside `src/`. Its only
+  consumers were the one-off probes moved to `tmp/` this release. Dead
+  code living in the SDK surface; removed wholesale.
+- **Outside-world references from `src/` docstrings and comments.**
+  Stripped pointers to `kb/nvfp4-blackwell-research.md`,
+  `docs/plans/*.md`, and `examples/*.py` from
+  `gpu/nvfp4_matmul.py`, `bridges/gemma4/loader.py`,
+  `bridges/gemma4/modeling_nvfp4.py`, and
+  `workloads/{parity,reasoning,quality}.py`. Core code no longer knows
+  that anything exists outside `src/`.
+
+### Housekeeping — `examples/` reorganization
+
+Sixteen files removed from `examples/` to match the new
+`examples/CLAUDE.md` bar:
+
+- **Moved to `tmp/` (gitignored, untracked):** `smoke_nvfp4.py`,
+  `probe_logits_at_divergence.py`, `probe_nvfp4_aot.py`,
+  `probe_nvfp4_aot_3d.py`, `probe_nvfp4_minimal.py`,
+  `probe_nvfp4_torchao.py`, `compile_probe.py`, `cuda_graph_probe.py`,
+  `fp4_probe.py`, `safe_probe.py`, `tune_nvfp4_kernel.py`,
+  `profile_nvfp4_decode.py`, `test_nvfp4_kernel.py`,
+  `test_nvfp4_3d_kernel.py`, `test_nvfp4_3d_ab_alpha.py`,
+  `test_nvfp4_bridge.py`. All were one-day bring-up artifacts from the
+  nvfp4 native-matmul and 3D-kernel work; git history confirms none had
+  been touched since the investigation that produced them concluded.
+  The `test_*` files were standalone `main() → int` scripts, not
+  pytest-discoverable — a real test suite was never the goal.
+- `examples/` now holds only canonical SDK surface: the `parity_check`,
+  `parity_long_check`, `quality_check`, `reasoning_check`,
+  `multi_turn_16k`, `multi_turn_32k`, `profile_generate`, and
+  `build_checkpoint*` scripts, plus `README.md` and `CLAUDE.md`.
+
 ## [0.1.10] - 2026-04-17
 
 ### Added

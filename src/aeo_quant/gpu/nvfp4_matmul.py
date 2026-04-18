@@ -13,22 +13,19 @@ Triton's ``ScaledBlockedToMMA`` MLIR pattern hard-rejects
 through to a slow scaled-dot decomposition.  The override makes Triton
 treat the chip as sm_120 for MLIR-pass purposes; consumer-Blackwell
 sm_120/sm_121 share the same ``mma.sync...kind::mxf4nvf4`` encoding,
-so the resulting PTX loads and runs on sm_121.  See
-``kb/nvfp4-blackwell-research.md`` "second deep dive" for the full
-story.
+so the resulting PTX loads and runs on sm_121.
 
 Tile budget is sized for GB10's 99 KiB smem/SM (vs 228 KiB on B200):
 default ``BLOCK_M=BLOCK_N=128, BLOCK_K=128, NUM_STAGES=2``.  Small-M
 (decode) lowers BLOCK_M to match the token count; prefill uses larger
 tiles.
 
-Two-level NVFP4 scaling — we handle Level 2 in the epilogue:
+Two-level NVFP4 scaling — Level 2 is handled in the epilogue:
 
 * Level 1 (FP8 E4M3 per-16-element block) goes straight into
   ``tl.dot_scaled``.
 * Level 2 (FP32 per-tensor) is folded as a single ``fmul`` on the
-  accumulator before the bf16 down-cast.  Option B of the plan, see
-  ``docs/plans/2026-04-16-native-nvfp4-matmul.md``.
+  accumulator before the bf16 down-cast.
 """
 from __future__ import annotations
 
@@ -48,9 +45,6 @@ def _swap_nibbles(x):
     Triton's ``tl.dot_scaled`` (and NVIDIA's FP4 MMA hardware) expects
     the opposite: (k0 → low, k1 → high).  Three-op fix: mask, shift,
     OR.  Negligible vs the MMA.
-
-    See ``kb/nvfp4-blackwell-research.md`` and the offline validation
-    in ``examples/test_nvfp4_kernel.py`` for the full story.
     """
     return ((x & 0xF) << 4) | ((x >> 4) & 0xF)
 
@@ -93,8 +87,7 @@ def _nvfp4_matmul_kernel_3d(
     experts (as in the Gemma 4 NVFP4 checkpoint: *_scale_2 is a single
     scalar per projection). For per-expert activation, the global
     a_tensor_scale is computed over the whole (E, M, K) tensor; the
-    parity drift vs per-expert quantization is < 2% (validated in
-    examples/test_nvfp4_3d_ab_alpha.py).
+    parity drift vs per-expert quantization is < 2%.
     """
     pid_mn = tl.program_id(axis=0)
     pid_e = tl.program_id(axis=1)
@@ -352,13 +345,11 @@ def nvfp4_linear_prequantized(
     # Tile selection.  Decode path (M small) lowers BLOCK_M so we don't
     # waste tensor-core lanes on zero-padded rows.
     #
-    # Tuning notes (examples/tune_nvfp4_kernel.py):
-    # - NUM_STAGES=3 + num_warps=4 hits 74 TFLOPS at M=1024, K=2816, N=1408
-    # - But at M=2880, N=5760 (many programs × 990 ~ SMs), NUM_STAGES=3
-    #   hurts due to occupancy.  Keep 2 as the safe default; the kernel
-    #   stays fast for small shapes even without the extra stage.
-    # - Larger prefill shapes benefit from autotune per-shape; defer
-    #   until we have more workload data.
+    # NUM_STAGES=3 + num_warps=4 hits 74 TFLOPS at M=1024, K=2816, N=1408,
+    # but at M=2880, N=5760 (many programs × ~SMs), NUM_STAGES=3 hurts
+    # due to occupancy.  Keep 2 as the safe default; small shapes stay
+    # fast even without the extra stage.  Larger prefill shapes would
+    # benefit from per-shape autotune once we have the workload data.
     if M <= 16:
         BLOCK_M = 16
     elif M <= 32:

@@ -1,9 +1,9 @@
 """Parity workload: generate N greedy tokens from a fixed prompt.
 
-Pure compute — no filesystem I/O, no baseline comparison. The CLI wrapper
-(``examples/parity_check.py``) handles writing ``output.txt``, diffing against
-the pinned baseline, and exit codes. The harness server calls ``run()``
-directly and returns the dict to the client over the socket.
+Pure compute — no filesystem I/O, no baseline comparison. Callers are
+responsible for writing output, diffing against baselines, and setting
+exit codes. The harness server invokes ``run()`` directly and returns the
+result dict to the client over the socket.
 """
 
 from __future__ import annotations

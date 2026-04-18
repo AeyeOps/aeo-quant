@@ -271,6 +271,11 @@ async def _main_async(state: ServerState) -> int:
 
     print(f"[harness] ready on {SOCKET_PATH}", flush=True)
     print(f"[harness] workloads: {sorted(WORKLOADS)}", flush=True)
+    print(
+        "[harness] running in the foreground — Ctrl+C or "
+        "`aeo-harness stop` from another shell to exit.",
+        flush=True,
+    )
 
     try:
         await state.shutdown_event.wait()

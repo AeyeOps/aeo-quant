@@ -62,7 +62,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(prog="aeo-harness", description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p_start = sub.add_parser("start", help="load model and serve requests")
+    p_start = sub.add_parser(
+        "start",
+        help="load model and serve in the foreground (Ctrl+C or "
+             "`aeo-harness stop` from another shell to exit)",
+    )
     p_start.add_argument(
         "--format", choices=["fp8", "nvfp4"],
         help="override QUANT_FORMAT for this run",

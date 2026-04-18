@@ -21,7 +21,6 @@ to ``mma.sync...kind::mxf4nvf4`` instead of decomposition — see
 from __future__ import annotations
 
 import contextlib
-import os
 
 import torch
 from transformers import AutoModelForCausalLM
@@ -130,16 +129,6 @@ def load_gemma4_nvfp4(model_id_or_path, **from_pretrained_kwargs):
 
     from_pretrained_kwargs.setdefault("dtype", torch.bfloat16)
     from_pretrained_kwargs.setdefault("device_map", "cuda")
-
-    if os.environ.get("TRITON_OVERRIDE_ARCH") != "sm120":
-        print(
-            "[nvfp4] WARNING: TRITON_OVERRIDE_ARCH is not 'sm120'. "
-            "On sm_121 (GB10) this is required for tl.dot_scaled to "
-            "lower to kind::mxf4nvf4 MMA; without it the kernel falls "
-            "through to a slow decomposition. "
-            "See kb/nvfp4-blackwell-research.md.",
-            flush=True,
-        )
 
     mem_report("nvfp4_load:start")
     t_load = time.time()

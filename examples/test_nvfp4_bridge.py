@@ -17,7 +17,7 @@ For each of gate_up_proj and down_proj from expert 0 of layer 0:
 
 Usage::
 
-    TRITON_OVERRIDE_ARCH=sm120 uv run python examples/test_nvfp4_bridge.py
+    uv run python examples/test_nvfp4_bridge.py
 
 Safe: peak VRAM under 1 GB (one layer's experts).
 """
@@ -30,6 +30,10 @@ import time
 from pathlib import Path
 
 import torch
+
+from aeo_quant.core.config import ensure_nvfp4_triton_arch
+
+ensure_nvfp4_triton_arch()
 
 
 def _load_expert_0(ckpt_dir: str) -> dict:

@@ -9,8 +9,7 @@ perturbation).
 
 Usage::
 
-    TRITON_OVERRIDE_ARCH=sm120 QUANT_FORMAT=nvfp4 \\
-        uv run python examples/probe_logits_at_divergence.py
+    QUANT_FORMAT=nvfp4 uv run python examples/probe_logits_at_divergence.py
 
 Prints the top-10 tokens with logits and softmax probabilities at a
 fixed step (default: index 40, matches the Phase 6 divergence).

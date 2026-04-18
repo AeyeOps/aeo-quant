@@ -83,6 +83,28 @@ def setup_cuda_allocator(config: str = "expandable_segments:True") -> None:
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", config)
 
 
+def ensure_nvfp4_triton_arch() -> None:
+    """Set ``TRITON_OVERRIDE_ARCH=sm120`` for the NVFP4 kernel path.
+
+    Triton's ``ScaledBlockedToMMA`` MLIR pattern hard-rejects compute
+    capabilities other than 120, so ``tl.dot_scaled`` on sm_121 (GB10)
+    silently falls through to a slow decomposition. sm_121 and sm_120
+    share the same native ``mma.sync...kind::mxf4nvf4`` encoding, so
+    coercing Triton to treat the chip as sm_120 for MLIR purposes
+    produces PTX that runs correctly on both.
+
+    Uses ``setdefault`` so an explicit user setting (e.g. benchmarking
+    the fallback path on purpose) is preserved. Safe to call before or
+    after any torch import — Triton reads the env var at kernel compile
+    time, not at module import.
+
+    Call from anything that loads an NVFP4 model or exercises the
+    NVFP4 kernel directly. :func:`quant_env` calls it automatically
+    when ``QUANT_FORMAT=nvfp4``.
+    """
+    os.environ.setdefault("TRITON_OVERRIDE_ARCH", "sm120")
+
+
 def quant_env() -> tuple[str, Path, int]:
     """Read quantization config from environment.
 
@@ -92,6 +114,9 @@ def quant_env() -> tuple[str, Path, int]:
           - ``checkpoint_path``: resolved from ``CHECKPOINT``, ``FP8_CHECKPOINT``,
             or ``NVFP4_CHECKPOINT`` depending on format
           - ``kv_bits``: from ``KV_BITS`` env var (default 4 for fp8, 3 for nvfp4)
+
+    Side effect for nvfp4: calls :func:`ensure_nvfp4_triton_arch` so
+    the user doesn't have to remember the sm_121-Triton quirk.
 
     Calls ``sys.exit(1)`` if no checkpoint path is found.
     """
@@ -110,6 +135,10 @@ def quant_env() -> tuple[str, Path, int]:
         )
         sys.exit(1)
     kv_bits = int(os.environ.get("KV_BITS", "3" if fmt == "nvfp4" else "4"))
+
+    if fmt == "nvfp4":
+        ensure_nvfp4_triton_arch()
+
     return fmt, Path(ckpt), kv_bits
 
 

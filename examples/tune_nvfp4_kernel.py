@@ -2,15 +2,16 @@
 """Hand-tuning probe for the NVFP4 kernel.
 
 Sweeps BLOCK_M × BLOCK_N × NUM_STAGES × num_warps at the Gemma 4
-expert prefill shape and reports TFLOPS for each combination.  Run
-with ``TRITON_OVERRIDE_ARCH=sm120`` to get the native FP4 MMA path.
+expert prefill shape and reports TFLOPS for each combination.
 
 Usage::
 
-    TRITON_OVERRIDE_ARCH=sm120 uv run python examples/tune_nvfp4_kernel.py
+    uv run python examples/tune_nvfp4_kernel.py
 
-Output is sorted by TFLOPS.  Best config is a candidate for the
-launcher's default tile selection.
+Output is sorted by TFLOPS. Best config is a candidate for the
+launcher's default tile selection. The sm_120 Triton arch coercion
+needed on GB10 is applied automatically via
+``ensure_nvfp4_triton_arch()``.
 """
 from __future__ import annotations
 
@@ -20,8 +21,13 @@ import sys
 import time
 
 import torch
-import triton
-import triton.language as tl
+
+from aeo_quant.core.config import ensure_nvfp4_triton_arch
+
+ensure_nvfp4_triton_arch()
+
+import triton  # noqa: E402 — triton must see the arch override before compile
+import triton.language as tl  # noqa: E402
 
 
 @triton.jit

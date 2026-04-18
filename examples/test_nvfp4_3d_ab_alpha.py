@@ -31,12 +31,16 @@ from pathlib import Path
 
 import torch
 
+from aeo_quant.core.config import ensure_nvfp4_triton_arch
+
+ensure_nvfp4_triton_arch()
+
 
 def main() -> int:
     ckpt = os.environ.get("NVFP4_CHECKPOINT", "/opt/dev/aeo/hf-gemma4-nvfp4")
     print("=== nvfp4 3D A/B alpha test ===")
     print(f"checkpoint: {ckpt}")
-    print(f"TRITON_OVERRIDE_ARCH = {os.environ.get('TRITON_OVERRIDE_ARCH', '(not set)')}")
+    print(f"TRITON_OVERRIDE_ARCH = {os.environ.get('TRITON_OVERRIDE_ARCH', '(unset)')}")
 
     if not torch.cuda.is_available():
         print("[FATAL] CUDA not available")

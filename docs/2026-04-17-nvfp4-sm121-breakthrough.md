@@ -175,14 +175,14 @@ None are blockers.  They're the next sprint.
 # 1. Offline validation (no GPU):
 uv run python examples/probe_nvfp4_aot.py --targets 120
 
-# 2. Live tiny probe:
+# 2. Live tiny probe (explicit override — this one demonstrates the behavior):
 TRITON_OVERRIDE_ARCH=sm120 uv run python examples/probe_nvfp4_minimal.py
 
 # 3. Multi-shape synthetic:
-TRITON_OVERRIDE_ARCH=sm120 uv run python examples/test_nvfp4_kernel.py
+uv run python examples/test_nvfp4_kernel.py
 
 # 4. Real checkpoint, one expert:
-TRITON_OVERRIDE_ARCH=sm120 uv run python examples/test_nvfp4_bridge.py
+uv run python examples/test_nvfp4_bridge.py
 
 # 5. Confirm SASS is native FP4 MMA:
 tools/dump_triton_sass.sh --name _nvfp4_matmul --limit 5000 \

@@ -7,7 +7,9 @@ Gemma-decode (Phase 2) geometries.
 
 Safe: VRAM << 500 MB at all shapes. No model load.
 
-Run with ``TRITON_OVERRIDE_ARCH=sm120`` on GB10 (sm_121); warns if unset.
+The sm_120 Triton arch coercion required on GB10 is applied
+automatically at import via ``ensure_nvfp4_triton_arch()``. Pin
+``TRITON_OVERRIDE_ARCH`` explicitly to benchmark the fallback.
 
 Exit codes:
   0 — all shapes within tolerance (max rel_err < 1e-3 vs per-expert ref)
@@ -21,6 +23,10 @@ import sys
 import time
 
 import torch
+
+from aeo_quant.core.config import ensure_nvfp4_triton_arch
+
+ensure_nvfp4_triton_arch()
 
 
 def _run_one(E: int, M: int, K: int, N: int, *, verbose: bool = True) -> dict:
@@ -185,19 +191,13 @@ def _run_one_per_expert(E: int, M: int, K: int, N: int, *, verbose: bool = True)
 
 def main() -> int:
     print("=== nvfp4 3D kernel test ===")
-    override = os.environ.get("TRITON_OVERRIDE_ARCH", "")
-    print(f"TRITON_OVERRIDE_ARCH = {override or '(not set)'}")
+    print(f"TRITON_OVERRIDE_ARCH = {os.environ.get('TRITON_OVERRIDE_ARCH', '(unset)')}")
     if not torch.cuda.is_available():
         print("[FATAL] CUDA not available")
         return 2
 
     cc = torch.cuda.get_device_capability(0)
     print(f"device: {torch.cuda.get_device_name(0)} (sm_{cc[0]}{cc[1]})")
-    if cc == (12, 1) and override != "sm120":
-        print(
-            "\n[WARNING] sm_121 without TRITON_OVERRIDE_ARCH=sm120:"
-            " tl.dot_scaled falls through to a slow decomposition."
-        )
 
     import triton
     print(f"triton: {triton.__version__}\n")

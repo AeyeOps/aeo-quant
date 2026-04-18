@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
-"""Unit test of the native NVFP4 Triton kernel.
+"""Unit test of the NVFP4 Triton kernel.
 
-Runs `nvfp4_linear` at decode (M=1, M=8) and prefill (M=128, M=2816)
+Runs ``nvfp4_linear`` at decode (M=1, M=8) and prefill (M=128, M=2816)
 shapes with our real checkpoint layout, compares output against a
 bf16 reference matmul computed from the dequantized weights.
 
 Safe: VRAM usage < 500 MB even at the largest shape. No model load.
 
-IMPORTANT: on GB10 (sm_121) this script should be run with::
-
-    TRITON_OVERRIDE_ARCH=sm120 uv run python examples/test_nvfp4_kernel.py
-
-Without the override, tl.dot_scaled falls through to a slow
-decomposition and correctness may be fine but the benchmark numbers
-will be misleading.  Prints a warning if the override is unset.
+The kernel auto-applies the sm_120 Triton arch coercion on GB10 via
+``ensure_nvfp4_triton_arch()`` — see ``aeo_quant.core.config`` for the
+rationale. You can still pin ``TRITON_OVERRIDE_ARCH`` explicitly on the
+command line to benchmark the fallback path.
 
 Exit codes:
   0 — all shapes pass (max rel err < 0.30 vs bf16 reference)
@@ -27,6 +24,10 @@ import sys
 import time
 
 import torch
+
+from aeo_quant.core.config import ensure_nvfp4_triton_arch
+
+ensure_nvfp4_triton_arch()
 
 
 # Gemma 4 expert shapes
@@ -98,20 +99,13 @@ def _test_shape(M: int, K: int, N: int, verbose: bool = True) -> dict:
 
 def main() -> int:
     print("=== nvfp4 kernel test ===")
-    override = os.environ.get("TRITON_OVERRIDE_ARCH", "")
-    print(f"TRITON_OVERRIDE_ARCH = {override or '(not set)'}")
+    print(f"TRITON_OVERRIDE_ARCH = {os.environ.get('TRITON_OVERRIDE_ARCH', '(unset)')}")
     if not torch.cuda.is_available():
         print("[FATAL] CUDA not available")
         return 2
 
     cc = torch.cuda.get_device_capability(0)
     print(f"device: {torch.cuda.get_device_name(0)} (sm_{cc[0]}{cc[1]})")
-    if cc == (12, 1) and override != "sm120":
-        print(
-            "\n[WARNING] on sm_121 (GB10) without TRITON_OVERRIDE_ARCH=sm120,"
-            "\n          tl.dot_scaled falls through to a slow decomposition."
-            "\n          Correctness may be fine but timings are misleading.",
-        )
 
     import triton
     print(f"triton: {triton.__version__}\n")

@@ -13,8 +13,7 @@ compose" check.
 
 Usage::
 
-    TRITON_OVERRIDE_ARCH=sm120 QUANT_FORMAT=nvfp4 \\
-        uv run python examples/smoke_nvfp4.py
+    QUANT_FORMAT=nvfp4 uv run python examples/smoke_nvfp4.py
 
 Env overrides: ``GEN_TOKENS`` (default 50), ``SMOKE_PROMPT``.
 Exits 0 if tokens generate; 1 on any error.
@@ -39,10 +38,7 @@ def main() -> int:
     load_dotenv()
     setup_cuda_allocator()
 
-    if os.environ.get("TRITON_OVERRIDE_ARCH") != "sm120":
-        print("[WARN] TRITON_OVERRIDE_ARCH is not 'sm120' — "
-              "kernel will fall back to slow decomposition")
-
+    # quant_env() sets TRITON_OVERRIDE_ARCH=sm120 when fmt=nvfp4.
     fmt, ckpt, kv = quant_env()
     if fmt != "nvfp4":
         print(f"[FATAL] QUANT_FORMAT must be 'nvfp4', got {fmt!r}", file=sys.stderr)

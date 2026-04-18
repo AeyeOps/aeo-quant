@@ -14,8 +14,7 @@ before picking a lever (on-device alpha, flash-attention-2, etc.).
 
 Usage::
 
-    TRITON_OVERRIDE_ARCH=sm120 QUANT_FORMAT=nvfp4 \\
-        uv run python examples/profile_nvfp4_decode.py
+    QUANT_FORMAT=nvfp4 uv run python examples/profile_nvfp4_decode.py
 
 Output: top-20 ops sorted by CPU time and top-20 by CUDA time. The
 gap (CPU time − CUDA time) is the launch-overhead component.

@@ -221,6 +221,108 @@ in `transformers.StaticCache.__init__`. Any future experiment using
 and class scope (see the inline workaround in `tmp/long_gen_v1_test.py`)
 or upstream a fix to transformers.
 
+## 2026-04-20 second follow-up — Commit 2 attempt (NVFP4 attention projections)
+
+After shipping Commit 1 (0.1.14 gather kernel, +15% decode), the next
+lever per the plan was the 58% bf16 matmul bucket — attention Q/K/V/O
+projections plus `lm_head`. We executed the plan fully:
+
+* `LinearNVFP4` module + `convert_linears_to_nvfp4` post-load walker,
+  mirroring the existing `Gemma4TextExpertsNVFP4` buffer layout (uint8
+  packed, fp8 block scales, fp32 tensor scale).
+* Loader hooked with `quantize_linears: bool = True` default.
+* Walker replaced 116 modules (30 q_proj + 30 k_proj + 25 v_proj under
+  the `attention_k_eq_v=True` config, 30 o_proj, 1 lm_head) in 2.1 s.
+* Quantization ran without errors; per-module load-smoke verified type,
+  shape, dtype, and single-forward finiteness.
+
+`parity_check.py` triggered the fast-fail rule immediately:
+**44/50 mismatches (88% divergence), max matching prefix 5 tokens**,
+80% divergence vs FP8 baseline too. Worse than the prior FP8-on-206-Linears
+attempt (46% divergence). Output was coherent Python-engineering prose —
+model didn't break, it chose a different path at every decode step.
+
+### Root cause
+
+Not a bug. Confirmed by three independent measurements:
+
+1. **Weight round-trip error on a single Linear:** 9.5% RMS on
+   (4096, 2816), (2816, 4096), (262144, 2816) shapes with Gaussian
+   weights at std 0.02 — same distribution as real attention weights.
+2. **2D quantizer vs 3D quantizer on identical input:** byte-identical
+   packed uint8, byte-identical fp8 block scales, byte-identical fp32
+   tensor scale. Not a 2D-path bug.
+3. **Per-matmul output error with activation quant:** 13% RMS, cosine
+   0.991. Theory predicts `sqrt(K) × w_std × 2^-4 / output_std ≈
+   sqrt(2816) × 0.02 × 0.0625 / 0.53 ≈ 12.5%` — matches measurement.
+
+Compounded across 30 layers × 4 projections on Gemma 4 (262K vocab,
+greedy decode), the top-1 vs top-2 logit gap is typically under 5% of
+top-1 magnitude, so a 13% per-matmul noise floor flips argmax at high
+rate. 88% divergence at token 5 is consistent with this math, not
+with a code defect.
+
+### Why MoE works and attention doesn't
+
+MoE experts have the same 9.5% per-matmul weight error — but the NVFP4
+parity baseline was *established with* NVFP4 MoE, so there is no
+bf16-MoE vs NVFP4-MoE reference delta in parity_check. Attention was
+unquantized at baseline time; introducing NVFP4 attention is a pure
+A-vs-B perturbation against a bf16 reference, and FP4 numerics don't
+survive that comparison.
+
+### Why narrow-scope variants also fail the product mission
+
+* **`lm_head`-only:** `lm_head` is tied to `embed_tokens`. Quantizing
+  it breaks the tie and costs ~370 MB of *additional* resident memory
+  for an NVFP4 buffer set, while `embed_tokens` stays bf16. That's a
+  net memory increase for a single-digit % potential speedup, and
+  aeo-quant's README-stated product is turbo-quant Gemma on **low
+  memory** with reasonable speed. Wrong direction on memory.
+  Additionally, parity on lm_head alone is not guaranteed — one-shot
+  13% logit noise in a 262K vocab can still flip top-1 on tight-gap
+  tokens.
+* **Attention subset (e.g. sliding layers only, or skip `o_proj`):**
+  the compounding problem doesn't cleanly partition. Any layer with
+  NVFP4 projections introduces 13% noise into the residual stream,
+  which perturbs the next layer's inputs. No clean floor.
+* **FP8 for attention:** the prior FP8-on-206-Linears attempt was
+  rejected for 0% speedup + 46% divergence. Per-row scale was the
+  quality failure mode; per-block would help but we'd be back to the
+  same fundamental precision question (FP8 E4M3 has ~3 bits of
+  mantissa within a block, still coarse on attention).
+
+### Verdict
+
+**NVFP4 quantization of Gemma 4 attention projections is closed as a
+decode-speedup lever on this model.** Same disposition as the
+fixed-buffer capturable cache from earlier this week: the math is
+fundamental, not a bug, and narrowing scope doesn't recover the
+product mission. Commit 2's working-directory changes reverted; the
+documentation record for the attempt lives here and in the memory
+entry `project_nvfp4_attention_infeasible.md`.
+
+### Remaining levers inside the transformers substrate
+
+With lever 1 (CUDA graph via cache) closed, lever 3 (attention kernel)
+a non-target at 0.29% CUDA time, lever 4 (alpha folding) shipped in
+0.1.12, the gather lever shipped in 0.1.14, and attention-projection
+NVFP4 closed here — the inventory is down to:
+
+* **Lever 2 (per-shape prefill autotune):** TTFT lever, not decode.
+* **Router NVFP4:** (128, 2816), 30× per step. Small matmul; at M=1
+  the per-call activation quant overhead will likely dominate the
+  bf16 GEMV. Low-probability win.
+* **Option B from Commit 2 plan (class-swap with shared activation
+  quant):** depended on attention projections being viable targets;
+  moot now.
+
+Current 18.74 tok/s is 2.77× the 6.77 baseline. Per
+`feedback_nvfp4_5x_objective.md`, realistic ceiling inside
+`transformers.generate()` is 20–30 tok/s. We're at the low end of that
+envelope. The remaining gap to the north-star 5× target (52 tok/s)
+lives in a substrate explicitly out of scope for aeo-quant.
+
 ## Scope-guard reminder
 
 aeo-quant is Gemma + NVFP4 + TurboQuant. A cache that doesn't preserve

@@ -7,15 +7,15 @@ class on exit (even if loading raises).
 
 FP8: loads the FP8 checkpoint into ``Gemma4TextExpertsFP8`` Parameters,
 pre-converts block scales to the RowWise fp32 layout ``_scaled_mm``
-expects, wraps with ``torch.compile``.
+expects.
 
 NVFP4: loads the NVFP4 checkpoint into ``Gemma4TextExpertsNVFP4``
-buffers (uint8 packed weights + fp8 block scales + fp32 tensor scale),
-wraps with ``torch.compile``. Inference routes through our Triton
-``tl.dot_scaled`` kernel (``_nvfp4_matmul_kernel_3d`` for decode,
-``_nvfp4_matmul_kernel`` for prefill). Requires
-``TRITON_OVERRIDE_ARCH=sm120`` on sm_121 (GB10) so the kernel lowers
-to ``mma.sync...kind::mxf4nvf4`` instead of decomposition.
+buffers (uint8 packed weights + fp8 block scales + fp32 tensor scale).
+Inference routes through our Triton ``tl.dot_scaled`` kernel
+(``_nvfp4_matmul_kernel_3d`` for decode, ``_nvfp4_matmul_kernel`` for
+prefill). Requires ``TRITON_OVERRIDE_ARCH=sm120`` on sm_121 (GB10) so
+the kernel lowers to ``mma.sync...kind::mxf4nvf4`` instead of
+decomposition.
 """
 from __future__ import annotations
 
@@ -80,9 +80,7 @@ def load_gemma4_fp8(model_id_or_path, **from_pretrained_kwargs):
     """Load a self-built FP8 Gemma 4 checkpoint with the class swap active.
 
     Defaults ``dtype=torch.bfloat16`` and ``device_map="cuda"`` unless the
-    caller overrides them via ``from_pretrained_kwargs``.  Wraps the model
-    with ``torch.compile(mode="reduce-overhead")`` to reduce kernel launch
-    overhead (+12% decode throughput, ~1 s one-time warmup).
+    caller overrides them via ``from_pretrained_kwargs``.
     """
     from_pretrained_kwargs.setdefault("dtype", torch.bfloat16)
     from_pretrained_kwargs.setdefault("device_map", "cuda")
@@ -91,7 +89,7 @@ def load_gemma4_fp8(model_id_or_path, **from_pretrained_kwargs):
             model_id_or_path, **from_pretrained_kwargs
         )
     _preconvert_fp8_scales(model)
-    return torch.compile(model, mode="reduce-overhead", dynamic=False)
+    return model
 
 
 # ---------------------------------------------------------------------------
@@ -137,4 +135,4 @@ def load_gemma4_nvfp4(model_id_or_path, **from_pretrained_kwargs):
     print(f"[nvfp4] from_pretrained done in {time.time() - t_load:.1f}s", flush=True)
     mem_report("nvfp4_load:done")
 
-    return torch.compile(model, mode="reduce-overhead", dynamic=False)
+    return model

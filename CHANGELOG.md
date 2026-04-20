@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.13] - 2026-04-20
+
+### Changed
+
+- **Dropped the `torch.compile(mode="reduce-overhead")` wrap from both
+  `load_gemma4_fp8` and `load_gemma4_nvfp4`.** Compile is a no-op via
+  `transformers.generate()` (HF's generate bypasses `OptimizedModule.__call__`
+  on the inner decoder loop), and is actively harmful on direct
+  `model(...)` calls — its internal `cudagraph_trees` conflicts with
+  `Gemma4HybridTurboQuantCache`'s `torch.cat`-based growth (`RuntimeError:
+  accessing tensor output of CUDAGraphs that has been overwritten by a
+  subsequent run`) and also fights explicit `torch.cuda.graph()` capture.
+  Loaders now return the raw `AutoModelForCausalLM` instance. No speedup
+  lost; blocker for any future direct-forward / graph-capture work removed.
+
 ## [0.1.12] - 2026-04-18
 
 ### Changed

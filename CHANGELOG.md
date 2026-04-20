@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.14] - 2026-04-20
+
+### Changed
+
+- **Kernel-side expert gather for the MoE decode matmul.** A new Triton
+  kernel `_nvfp4_matmul_kernel_3d_gather` and launcher
+  `nvfp4_linear_3d_gather` let `Gemma4TextExpertsNVFP4._forward_decode_3d`
+  pass the full `(E=128, ...)` expert-weight tensors straight to the
+  kernel, which picks each selected expert via `expert_ids[pid_e]`
+  indirection. The four prior `index_select` calls per layer
+  (`gate_up_proj`, `gate_up_proj_scale`, `down_proj`, `down_proj_scale`)
+  are gone — 120 per-step launches eliminated, plus the `(k, ...)`
+  gathered-weight tensor allocations they triggered. Arithmetic is
+  byte-for-byte identical to 0.1.13 (same FP4 weights, same fp32
+  accumulation order, same rounding). The non-gather launcher
+  `nvfp4_linear_3d_prequantized` is retained unchanged for the prefill
+  per-expert path.
+
+### Performance
+
+- Decode throughput on NVFP4 + `Gemma4HybridTurboQuantCache` improves
+  from ~16.3 to ~18.7 tok/s on the parity prompt (+15%, GB10 sm_121,
+  prompt_len=41, 41-token decode window). The win is purely in
+  eliminated launch overhead — profile confirms the
+  `aten::index_select` (10.8%) and `indexSelectSmallIndex` (10.8%)
+  buckets collapse to 0%; the gather kernel's own CUDA time grows from
+  7.9 ms to 26.5 ms across 5 decode steps (it absorbs the work), but
+  the removed per-step allocations, DMA copies, and launch latency net
+  out to a ~8 ms/step wall-clock win.
+
 ## [0.1.13] - 2026-04-20
 
 ### Changed

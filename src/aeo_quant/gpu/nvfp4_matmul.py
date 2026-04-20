@@ -50,6 +50,97 @@ def _swap_nibbles(x):
 
 
 @triton.jit
+def _nvfp4_matmul_kernel_3d_gather(
+    a_ptr, b_ptr,
+    a_scale_ptr, b_scale_ptr,
+    c_ptr,
+    alpha_ptr,  # fp32 pointer — folded a_tensor_scale * w_tensor_scale, loaded in-kernel
+    expert_ids_ptr,  # int32 (K_SELECTED,) — maps grid pid_e → real expert index in [0, E_FULL)
+    M, N, K,
+    stride_ae, stride_am, stride_ak,
+    stride_be, stride_bn, stride_bk,
+    stride_ae_scale, stride_am_scale, stride_ak_scale,
+    stride_be_scale, stride_bn_scale, stride_bk_scale,
+    stride_ce, stride_cm, stride_cn,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    VEC_SIZE: tl.constexpr,
+    ELEM_PER_BYTE: tl.constexpr,
+    NUM_STAGES: tl.constexpr,
+):
+    """Gather variant of :func:`_nvfp4_matmul_kernel_3d`.
+
+    Identical math to the non-gather kernel. Difference: the weight
+    pointers (``b``, ``b_scale``) are offset by a runtime indirection
+    ``expert_ids[pid_e]`` instead of ``pid_e`` itself, so the launcher
+    can pass the full ``(E_FULL, N, K//EPB)`` weight tensor unmutated
+    and let the kernel pick out the 0..K_SELECTED-1 slice via the
+    expert_ids table. Saves the per-step ``index_select`` allocation +
+    copy on decode.
+
+    Activation and output offsets still use ``pid_e`` (the activation
+    is index-aligned with the *gathered* set, and the output is written
+    into positions 0..K_SELECTED-1 on the c axis), so the only pointer
+    indirection is on the weight side.
+    """
+    pid_mn = tl.program_id(axis=0)
+    pid_e = tl.program_id(axis=1)
+    num_pid_m = tl.cdiv(M, BLOCK_M)
+    pid_m = pid_mn % num_pid_m
+    pid_n = pid_mn // num_pid_m
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+
+    offs_k_packed_base = tl.arange(0, BLOCK_K // ELEM_PER_BYTE)
+    offs_k_scale_base = tl.arange(0, BLOCK_K // VEC_SIZE)
+
+    real_expert = tl.load(expert_ids_ptr + pid_e)
+
+    a_expert_base = a_ptr + pid_e * stride_ae
+    a_scale_expert_base = a_scale_ptr + pid_e * stride_ae_scale
+    b_expert_base = b_ptr + real_expert * stride_be
+    b_scale_expert_base = b_scale_ptr + real_expert * stride_be_scale
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    for k_block in tl.range(0, K // BLOCK_K, num_stages=NUM_STAGES):
+        k_packed_start = k_block * (BLOCK_K // ELEM_PER_BYTE)
+        k_scale_start = k_block * (BLOCK_K // VEC_SIZE)
+
+        a_ptrs = (a_expert_base
+                  + offs_m[:, None] * stride_am
+                  + (k_packed_start + offs_k_packed_base)[None, :] * stride_ak)
+        b_ptrs = (b_expert_base
+                  + offs_n[:, None] * stride_bn
+                  + (k_packed_start + offs_k_packed_base)[None, :] * stride_bk)
+        a_scale_ptrs = (a_scale_expert_base
+                        + offs_m[:, None] * stride_am_scale
+                        + (k_scale_start + offs_k_scale_base)[None, :] * stride_ak_scale)
+        b_scale_ptrs = (b_scale_expert_base
+                        + offs_n[:, None] * stride_bn_scale
+                        + (k_scale_start + offs_k_scale_base)[None, :] * stride_bk_scale)
+
+        a_raw = tl.load(a_ptrs)
+        b_raw = tl.load(b_ptrs)
+        a = _swap_nibbles(a_raw)
+        b = _swap_nibbles(b_raw)
+        a_scale = tl.load(a_scale_ptrs)
+        b_scale = tl.load(b_scale_ptrs)
+
+        acc = tl.dot_scaled(a, a_scale, "e2m1", b.T, b_scale, "e2m1", acc)
+
+    alpha = tl.load(alpha_ptr)
+    acc = acc * alpha
+
+    c_ptrs = (c_ptr
+              + pid_e * stride_ce
+              + offs_m[:, None] * stride_cm
+              + offs_n[None, :] * stride_cn)
+    c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+    tl.store(c_ptrs, acc.to(tl.bfloat16), mask=c_mask)
+
+
+@triton.jit
 def _nvfp4_matmul_kernel_3d(
     a_ptr, b_ptr,
     a_scale_ptr, b_scale_ptr,
@@ -582,6 +673,184 @@ def nvfp4_linear_3d_prequantized(
         a_block_scale_3d, w_block_scale,
         c_padded,
         alpha,
+        M_padded, N, K,
+        stride_ae, stride_am, stride_ak,
+        w_packed.stride(0), w_packed.stride(1), w_packed.stride(2),
+        stride_ae_scale, stride_am_scale, stride_ak_scale,
+        w_block_scale.stride(0), w_block_scale.stride(1), w_block_scale.stride(2),
+        c_padded.stride(0), c_padded.stride(1), c_padded.stride(2),
+        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
+        VEC_SIZE=NVFP4_BLOCK_SIZE,
+        ELEM_PER_BYTE=2,
+        NUM_STAGES=NUM_STAGES,
+        num_warps=NUM_WARPS,
+    )
+
+    if M_padded != M:
+        return c_padded[:, :M, :]
+    return c_padded
+
+
+def nvfp4_linear_3d_gather(
+    a_packed: torch.Tensor,
+    a_block_scale: torch.Tensor,
+    a_tensor_scale: torch.Tensor,
+    w_packed: torch.Tensor,
+    w_block_scale: torch.Tensor,
+    w_tensor_scale: torch.Tensor,
+    expert_ids: torch.Tensor,
+    *,
+    out_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """Decode-only batched NVFP4 matmul with in-kernel expert gather.
+
+    Same math as :func:`nvfp4_linear_3d_prequantized`, same shape
+    contracts for activations, but weights are passed as the full
+    ``(E_FULL, N, K // 2)`` tensor and the kernel picks out each
+    selected expert by indirecting through ``expert_ids``. Replaces
+    the prior pattern of ``w_packed = w_full.index_select(0, ids)`` +
+    `nvfp4_linear_3d_prequantized`, eliminating the Python-level gather
+    allocation + copy on every decode step.
+
+    The output shape is ``(K_SELECTED, M, N)`` where
+    ``K_SELECTED = expert_ids.numel()`` — i.e. the same shape the
+    non-gather launcher would produce if fed the pre-gathered
+    ``(K_SELECTED, N, K // 2)`` weight tensor.
+
+    Args:
+        a_packed:        ``(M, K // 2)`` for shared activation or
+                         ``(K_SELECTED, M, K // 2)`` for per-expert.
+        a_block_scale:   matching shape with ``K // 16`` fp8_e4m3fn.
+        a_tensor_scale:  fp32 scalar.
+        w_packed:        ``(E_FULL, N, K // 2)`` uint8 — full weight
+                         tensor, not index_selected.
+        w_block_scale:   ``(E_FULL, N, K // 16)`` fp8_e4m3fn — full
+                         block-scale tensor.
+        w_tensor_scale:  fp32 scalar — shared across experts.
+        expert_ids:      ``(K_SELECTED,)`` integer tensor naming the
+                         real expert indices in ``[0, E_FULL)``.
+                         Coerced to int32 on-device if not already.
+        out_dtype:       bf16 (default) or fp32.
+
+    Returns:
+        ``(K_SELECTED, M, N)`` of ``out_dtype``.
+    """
+    if w_packed.ndim != 3:
+        raise ValueError(
+            f"w_packed must be 3D (E_FULL, N, K//2); "
+            f"got shape {tuple(w_packed.shape)}"
+        )
+    E_full, N, K_half_w = w_packed.shape
+
+    if expert_ids.ndim != 1:
+        raise ValueError(
+            f"expert_ids must be 1D; got shape {tuple(expert_ids.shape)}"
+        )
+    K_selected = expert_ids.shape[0]
+    if expert_ids.dtype != torch.int32:
+        expert_ids = expert_ids.to(torch.int32)
+    if not expert_ids.is_contiguous():
+        expert_ids = expert_ids.contiguous()
+
+    # Detect activation layout and canonicalize to 3D (K_SELECTED, M, K/2).
+    if a_packed.ndim == 2:
+        M, K_half_a = a_packed.shape
+        a_packed_3d = a_packed.unsqueeze(0)
+        a_block_scale_3d = a_block_scale.unsqueeze(0)
+        stride_ae = 0
+        stride_ae_scale = 0
+        stride_am = a_packed_3d.stride(1)
+        stride_ak = a_packed_3d.stride(2)
+        stride_am_scale = a_block_scale_3d.stride(1)
+        stride_ak_scale = a_block_scale_3d.stride(2)
+    elif a_packed.ndim == 3:
+        E_a, M, K_half_a = a_packed.shape
+        if E_a != K_selected:
+            raise ValueError(
+                f"per-expert activation E={E_a} must equal len(expert_ids)={K_selected}"
+            )
+        stride_ae = a_packed.stride(0)
+        stride_am = a_packed.stride(1)
+        stride_ak = a_packed.stride(2)
+        stride_ae_scale = a_block_scale.stride(0)
+        stride_am_scale = a_block_scale.stride(1)
+        stride_ak_scale = a_block_scale.stride(2)
+        a_packed_3d = a_packed
+        a_block_scale_3d = a_block_scale
+    else:
+        raise ValueError(
+            f"a_packed must be 2D (shared) or 3D (per-expert); "
+            f"got shape {tuple(a_packed.shape)}"
+        )
+
+    if K_half_a != K_half_w:
+        raise ValueError(
+            f"activation K//2={K_half_a} must equal weight K//2={K_half_w}"
+        )
+    K = K_half_a * 2
+
+    alpha = (a_tensor_scale.float() * w_tensor_scale.float())
+
+    if M <= 16:
+        BLOCK_M = 16
+    elif M <= 32:
+        BLOCK_M = 32
+    elif M <= 64:
+        BLOCK_M = 64
+    else:
+        BLOCK_M = 128
+    BLOCK_N = 128
+    BLOCK_K = 128 if K % 128 == 0 else 64
+    NUM_STAGES = 2
+    NUM_WARPS = 4
+
+    if N % BLOCK_N != 0:
+        raise ValueError(
+            f"N={N} must be divisible by BLOCK_N={BLOCK_N}. Pad upstream."
+        )
+    if K % BLOCK_K != 0:
+        raise ValueError(
+            f"K={K} must be divisible by BLOCK_K={BLOCK_K}. Pad upstream."
+        )
+
+    M_padded = ((M + BLOCK_M - 1) // BLOCK_M) * BLOCK_M
+    if M_padded != M:
+        pad_E = a_packed_3d.shape[0]
+        a_packed_padded = torch.zeros(
+            pad_E, M_padded, a_packed_3d.shape[2],
+            dtype=a_packed_3d.dtype, device=a_packed_3d.device,
+        )
+        a_packed_padded[:, :M, :] = a_packed_3d
+        a_block_scale_padded = torch.zeros(
+            pad_E, M_padded, a_block_scale_3d.shape[2],
+            dtype=a_block_scale_3d.dtype, device=a_block_scale_3d.device,
+        )
+        a_block_scale_padded[:, :M, :] = a_block_scale_3d
+        a_packed_3d = a_packed_padded
+        a_block_scale_3d = a_block_scale_padded
+        if stride_ae != 0:
+            stride_ae = a_packed_3d.stride(0)
+            stride_ae_scale = a_block_scale_3d.stride(0)
+        stride_am = a_packed_3d.stride(1)
+        stride_ak = a_packed_3d.stride(2)
+        stride_am_scale = a_block_scale_3d.stride(1)
+        stride_ak_scale = a_block_scale_3d.stride(2)
+        c_padded = torch.empty(
+            (K_selected, M_padded, N), dtype=out_dtype, device=a_packed_3d.device,
+        )
+    else:
+        c_padded = torch.empty(
+            (K_selected, M, N), dtype=out_dtype, device=a_packed_3d.device,
+        )
+
+    grid = (triton.cdiv(M_padded, BLOCK_M) * triton.cdiv(N, BLOCK_N), K_selected)
+
+    _nvfp4_matmul_kernel_3d_gather[grid](
+        a_packed_3d, w_packed,
+        a_block_scale_3d, w_block_scale,
+        c_padded,
+        alpha,
+        expert_ids,
         M_padded, N, K,
         stride_ae, stride_am, stride_ak,
         w_packed.stride(0), w_packed.stride(1), w_packed.stride(2),

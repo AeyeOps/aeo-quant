@@ -130,7 +130,7 @@ class Gemma4TextExpertsNVFP4(Gemma4TextExperts):
 
         Combine applies top_k_weights and sums along the k axis.
         """
-        from aeo_quant.gpu.nvfp4_matmul import nvfp4_linear_3d_prequantized
+        from aeo_quant.gpu.nvfp4_matmul import nvfp4_linear_3d_gather
         from aeo_quant.gpu.quant import quantize_2d_to_nvfp4
 
         # (1, top_k) → (top_k,). For M=1 there is exactly one row of
@@ -144,11 +144,10 @@ class Gemma4TextExpertsNVFP4(Gemma4TextExperts):
             )
 
         with _moe_range("nvfp4_moe_3d_gate_up"):
-            w_gu_packed = self.gate_up_proj.index_select(0, expert_ids)
-            w_gu_bs = self.gate_up_proj_scale.index_select(0, expert_ids)
-            gate_up = nvfp4_linear_3d_prequantized(
+            gate_up = nvfp4_linear_3d_gather(
                 h_packed, h_block_scale, h_tensor_scale,
-                w_gu_packed, w_gu_bs, self.gate_up_proj_scale_2,
+                self.gate_up_proj, self.gate_up_proj_scale, self.gate_up_proj_scale_2,
+                expert_ids,
             )  # (k, 1, 2*im)
             gate, up = gate_up.chunk(2, dim=-1)
             current = self.act_fn(gate) * up  # (k, 1, im)
@@ -164,11 +163,10 @@ class Gemma4TextExpertsNVFP4(Gemma4TextExperts):
             d_block_scale = d_block_scale_2d.unsqueeze(1)  # (k, 1, im//16)
 
         with _moe_range("nvfp4_moe_3d_down"):
-            w_d_packed = self.down_proj.index_select(0, expert_ids)
-            w_d_bs = self.down_proj_scale.index_select(0, expert_ids)
-            down_out = nvfp4_linear_3d_prequantized(
+            down_out = nvfp4_linear_3d_gather(
                 d_packed, d_block_scale, d_tensor_scale,
-                w_d_packed, w_d_bs, self.down_proj_scale_2,
+                self.down_proj, self.down_proj_scale, self.down_proj_scale_2,
+                expert_ids,
             )  # (k, 1, hidden)
 
         with _moe_range("nvfp4_moe_3d_combine"):

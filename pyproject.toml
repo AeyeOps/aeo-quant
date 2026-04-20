@@ -1,6 +1,6 @@
 [project]
 name = "aeo-quant"
-version = "0.1.13"
+version = "0.1.14"
 description = "AeyeOps quantization toolkit — model evaluation, benchmarking, and quantization bridges"
 requires-python = ">=3.12"
 license = "Apache-2.0"

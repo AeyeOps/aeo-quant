@@ -1,16 +1,20 @@
 <div align="center">
-<h2>Gemma 4 26B-A4B — FP8 w/ TurboQuant KV!</h2>
+<h2>Gemma 4 26B-A4B — FP8 and NVFP4 w/ TurboQuant KV</h2>
 <p>
-Full 26B MoE model in <strong>26.9 GB VRAM</strong> using FP8 quantized experts
-and <a href="https://pypi.org/project/turboquant/">TurboQuant</a> 4-bit KV cache.<br>
-Pre-built checkpoint ready to download and run.
+Full 26B MoE model in <strong>~27 GB</strong> (FP8) or <strong>~19 GB</strong> (NVFP4) quantized experts,
+paired with <a href="https://pypi.org/project/turboquant/">TurboQuant</a> 3-bit / 4-bit KV cache.<br>
+Two pre-built checkpoints ready to download and run on consumer Blackwell (GB10).
 </p>
 <p>
-<a href="https://huggingface.co/aeyeops/gemma-4-26b-a4b-it-fp8"><strong>Download Checkpoint</strong></a>
+<a href="https://huggingface.co/aeyeops/gemma-4-26b-a4b-it-fp8"><strong>Download FP8</strong></a>
+&nbsp;&middot;&nbsp;
+<a href="https://huggingface.co/aeyeops/gemma-4-26b-a4b-it-nvfp4"><strong>Download NVFP4</strong></a>
 &nbsp;&middot;&nbsp;
 <a href="#quickstart"><strong>Quickstart</strong></a>
 &nbsp;&middot;&nbsp;
-<a href="docs/gemma4-fp8-results.md"><strong>How It Was Built</strong></a>
+<a href="docs/gemma4-fp8-results.md"><strong>FP8 deep dive</strong></a>
+&nbsp;&middot;&nbsp;
+<a href="docs/2026-04-17-nvfp4-sm121-breakthrough.md"><strong>NVFP4 deep dive</strong></a>
 </p>
 </div>
 
@@ -19,9 +23,11 @@ Pre-built checkpoint ready to download and run.
 > Gemma 4. Along the way we discovered that the public FP8 checkpoints were
 > broken — a module-to-linear incompatibility meant the quantized experts
 > never actually loaded. So we built our own FP8 bridge, and then the
-> tooling around it: benchmarks, parity gates, profiling. What started as
-> a workaround became something we want to reuse and share with the
-> community."*
+> tooling around it: benchmarks, parity gates, profiling. With FP8 proven,
+> we pushed further into FP4: a native Triton `mma.sync.*.kind::mxf4nvf4`
+> matmul on consumer Blackwell, kernel-side expert gather for MoE decode,
+> and a sliding-window-aware hybrid KV cache. What started as a workaround
+> became something we want to reuse and share with the community."*
 >
 > — Steve, AeyeOps
 
@@ -30,15 +36,16 @@ Pre-built checkpoint ready to download and run.
 # aeo-quant
 
 Quantization-aware inference and benchmarking toolkit for NVIDIA
-Blackwell. First bridge: **Gemma 4 26B-A4B in FP8**. The infrastructure
-is model-agnostic.
+Blackwell. First architecture: **Gemma 4 26B-A4B in FP8 and NVFP4**. The
+infrastructure is model-agnostic.
 
 ## SDK at a glance
 
 ```
 aeo-quant
 ├── bridges/              Quantization bridges — plug into HF transformers
-│   └── gemma4/             FP8 experts, class-swap loader, checkpoint builder
+│   └── gemma4/             FP8 + NVFP4 experts, class-swap loader, checkpoint builders,
+│                           native Triton matmul, hybrid sliding-window KV cache
 │
 ├── core/                 Model-agnostic infrastructure (stdlib only)
 │   ├── streaming           OpenAI-compatible HTTP streaming client
@@ -47,20 +54,24 @@ aeo-quant
 │   ├── context             Conversation history budget trimming
 │   ├── writers             Thread-safe JSONL + CSV + HTML transcript
 │   ├── analysis            Load-test analytics (percentiles, ramp detection)
-│   └── types               Runtime monitor w/ kill switch, data types
+│   └── config              `quant_env()` — QUANT_FORMAT, checkpoint dispatch, sm120 coerce
 │
 ├── gpu/                  CUDA utilities (torch + psutil)
 │   ├── memory              CudaTimer, mem_report, enforce_cap
-│   └── quant               FP8 quantization (3D fused, 2D standard)
+│   ├── quant               FP8 and NVFP4 quantization (2D and 3D fused)
+│   └── nvfp4_matmul        Native Triton NVFP4 matmul kernels (2D prefill, 3D decode)
 │
 ├── plots/                Context-scaling dashboards (matplotlib)
 ├── prompts/              Progressive multi-turn evaluation prompts
 │
-└── examples/             Ready-to-run scripts
+└── examples/             Ready-to-run scripts (all honor QUANT_FORMAT)
     ├── profile_generate    Timing + profiler + NVTX/nsys auto-wrap
-    ├── parity_check        Greedy regression canary vs pinned baseline
+    ├── parity_check        Greedy regression canary vs pinned baseline (per-format)
+    ├── parity_long_check   2000-token regression gate (crosses SWA boundary)
     ├── quality_check       Three-prompt coherence smoke test
+    ├── reasoning_check     Two hard reasoning prompts, 500 tokens each
     ├── build_checkpoint    Shard-streaming FP8 checkpoint builder
+    ├── build_checkpoint_nvfp4  Shard-streaming NVFP4 checkpoint builder
     └── multi_turn_*        16K / 32K conversation benchmarks
 ```
 
@@ -72,15 +83,18 @@ torch, `bridges` adds transformers, `plots` adds matplotlib.
 graph LR
     subgraph "aeo-quant"
         B[bridges/gemma4] -->|class swap| HF[HuggingFace transformers]
-        B -->|torch._scaled_mm| GPU[CUDA / Blackwell]
-        B -->|TurboQuant 4-bit| KV[KV Cache]
-        C[core] -->|streaming| API[OpenAI-compat APIs]
-        C -->|segments + writers| OUT[Transcripts & Metrics]
+        B -->|torch._scaled_mm FP8| GPU[CUDA / Blackwell]
+        B -->|Triton NVFP4 matmul| GPU
+        B -->|TurboQuant 3/4-bit| KV[Hybrid KV Cache]
+        C[core/config] -->|quant_env| B
+        C -->|streaming + segments| OUT[Transcripts & Metrics]
         C -->|coherence + parity| GATE[Quality Gates]
-        G[gpu/quant] -->|FP8 quantize| B
+        G[gpu/quant] -->|FP8 and NVFP4 quantize| B
+        G2[gpu/nvfp4_matmul] -->|sm_121 Triton kernel| B
         P[plots] -->|dashboards| OUT
     end
-    CK[Checkpoint\naeyeops/gemma-4-26b-a4b-it-fp8] --> B
+    FP8CK[Checkpoint\naeyeops/gemma-4-26b-a4b-it-fp8] --> B
+    NVFP4CK[Checkpoint\naeyeops/gemma-4-26b-a4b-it-nvfp4] --> B
 ```
 
 ## What it does
@@ -92,8 +106,22 @@ graph LR
   per-output-channel scales, runs MoE forward through `torch._scaled_mm`
   with per-row dynamic input quantization. Pre-built checkpoint:
   [`aeyeops/gemma-4-26b-a4b-it-fp8`](https://huggingface.co/aeyeops/gemma-4-26b-a4b-it-fp8).
-- **Checkpoint builder.** Shard-streaming FP8 quantization from bf16
-  safetensors — peaks ~18 GB RSS, never materializes full weights.
+- **Gemma 4 NVFP4 bridge.** `Gemma4TextExpertsNVFP4` class-swap loader —
+  same plug-in pattern, but with packed FP4 E2M1 weights, FP8 per-block
+  scales, and FP32 per-tensor scales. Forward pass runs through custom
+  Triton kernels (`nvfp4_linear_prequantized` for prefill,
+  `nvfp4_linear_3d_gather` for M=1 decode) that drive consumer Blackwell's
+  `mma.sync.*.kind::mxf4nvf4` FP4 MMA instruction directly — no intermediate
+  dequant to FP8. Pre-built checkpoint:
+  [`aeyeops/gemma-4-26b-a4b-it-nvfp4`](https://huggingface.co/aeyeops/gemma-4-26b-a4b-it-nvfp4).
+- **Checkpoint builders.** Shard-streaming FP8 and NVFP4 quantization
+  from bf16 safetensors — peaks ~18 GB RSS, never materializes full
+  weights.
+- **Hybrid sliding-window KV cache.** `Gemma4HybridTurboQuantCache`
+  respects Gemma 4's 25 sliding-window layers + 5 full-attention layers,
+  capping compressed storage on sliding layers at `sliding_window − 1 − residual_len`
+  tokens. At 16K–32K context, eliminates ~80% of the per-step dequant
+  work on masked-out KV positions.
 
 ### Inference benchmarking
 
@@ -101,11 +129,20 @@ graph LR
   trace, NVTX markers with nsys auto-wrap (`AEO_MOE_TRACE=1`).
 - **Multi-turn benchmarks.** 16K / 32K context runs with JSONL
   transcripts, CSV metrics, HTML viewer, and 4-panel PNG dashboards.
-- **Parity check.** 50-token greedy regression canary vs pinned baseline.
+- **Parity check.** 50-token greedy regression canary vs pinned
+  per-format baseline. NVFP4 additionally reports an informational
+  FP8-baseline delta.
+- **Long parity check.** 2000-token regression gate — crosses Gemma 4's
+  1024-token sliding window so SWA-eviction bugs surface.
 - **Quality check.** Three-prompt coherence smoke test.
+- **Reasoning check.** Two hard prompts (math proof, concurrent bug
+  hunt), 500 tokens each.
 
 ### Model-agnostic infrastructure
 
+- **Harness daemon.** `aeo-harness` — long-running UNIX-socket service
+  that loads the model once and serves workload requests from multiple
+  clients. Eliminates the ~120s load cost per invocation.
 - **Runtime monitor.** Thread-safe sampling of memory, KV%, throughput
   with kill switch on threshold breach.
 - **Memory management.** `CudaTimer`, `mem_report()`, `enforce_cap()`.
@@ -131,9 +168,13 @@ graph LR
   unified LPDDR5x).
 - **GPU-only.** The code fails fast if CUDA is unavailable. There is no
   CPU fallback path and no intention to add one.
-- **Requires FP8 hardware.** `torch._scaled_mm` with
+- **FP8 path requires FP8 hardware.** `torch._scaled_mm` with
   `torch.float8_e4m3fn` needs Hopper or Blackwell. Earlier GPUs are not
   supported.
+- **NVFP4 path requires consumer Blackwell.** Validated on `sm_121`
+  (GB10) via `TRITON_OVERRIDE_ARCH=sm120` (auto-set by `quant_env()`).
+  Datacenter Blackwell (`sm_100`, B100/B200) uses a different FP4 MMA
+  encoding and has not been tested. Requires Triton ≥ 3.5.
 - Tested on a single-GPU unified-memory configuration. Multi-GPU has not
   been exercised.
 
@@ -169,15 +210,23 @@ works even without the heavy dependencies.
 ## Configuration
 
 Every example script reads a `.env` file from the current directory (or
-any parent directory). Create one next to the script you run:
+any parent directory). Pick a `QUANT_FORMAT` and set the matching
+checkpoint path (or HF repo ID):
 
 ```
+# Pick one format. Defaults to fp8 if unset.
+QUANT_FORMAT=nvfp4
+
+# Checkpoints (HF repo ID or local path). Set whichever you use.
 FP8_CHECKPOINT=aeyeops/gemma-4-26b-a4b-it-fp8
+NVFP4_CHECKPOINT=aeyeops/gemma-4-26b-a4b-it-nvfp4
+
 HF_TOKEN=hf_your_token_here
 ```
 
-`FP8_CHECKPOINT` accepts either a Hugging Face model ID (downloaded
-automatically) or a local path to a checkpoint you built yourself.
+`quant_env()` resolves `QUANT_FORMAT` + the matching `*_CHECKPOINT` and
+(for nvfp4) auto-applies `TRITON_OVERRIDE_ARCH=sm120` before Triton
+compiles. `KV_BITS` defaults to 4 for FP8 and 3 for NVFP4.
 
 `.env` overrides any existing environment variables; this is
 intentional, so you have a single source of truth per checkout.
@@ -185,54 +234,75 @@ intentional, so you have a single source of truth per checkout.
 ## Quickstart
 
 All examples live in `examples/` and are meant to be read, copied, and
-adapted.
+adapted. Every example honors `QUANT_FORMAT` — switch between FP8 and
+NVFP4 without touching the code.
 
 ### 1. Get a checkpoint
 
-The pre-built FP8 checkpoint is published on the Hub:
-[**aeyeops/gemma-4-26b-a4b-it-fp8**](https://huggingface.co/aeyeops/gemma-4-26b-a4b-it-fp8).
-Set `FP8_CHECKPOINT=aeyeops/gemma-4-26b-a4b-it-fp8` in your `.env`
-and the loader will download it automatically on first run.
+Both formats are published on the Hub:
 
-> **Why not use Google's FP8 releases?** The public
-> `google/gemma-4-26B-A4B-it` FP8 checkpoints ship with layouts that
-> fail to load on `transformers 5.5.3` — either the FP8 expert bytes
-> never get quantized (garbage output) or the unfused per-expert layout
-> is incompatible with the fused 3D `Gemma4TextExperts` module. See
+- **FP8** — [**aeyeops/gemma-4-26b-a4b-it-fp8**](https://huggingface.co/aeyeops/gemma-4-26b-a4b-it-fp8)
+  — 27 GB artifact, 60 FP8 expert tensors + 60 bf16 scales + 953 bf16
+  pass-through.
+- **NVFP4** — [**aeyeops/gemma-4-26b-a4b-it-nvfp4**](https://huggingface.co/aeyeops/gemma-4-26b-a4b-it-nvfp4)
+  — 19 GB artifact, 180 NVFP4 buffers (packed uint8 + fp8 block scales +
+  fp32 tensor scales) + 953 bf16 pass-through. Consumer Blackwell only.
+
+Set the matching `*_CHECKPOINT` in your `.env` and the loader will
+download it automatically on first run.
+
+> **Why not use Google's FP8 / NVFP4 releases?** The public
+> `google/gemma-4-26B-A4B-it` quantized checkpoints ship with layouts
+> that fail to load on `transformers 5.5.3` — standard quantization
+> tools walk `nn.Linear` modules and silently skip the 3D fused
+> `Gemma4TextExperts` tensors (91% of model parameters). See
 > [`docs/gemma4-fp8-results.md`](docs/gemma4-fp8-results.md) for the
 > full teardown.
 
-**Building your own checkpoint** (optional): If you'd rather quantize
-from the bf16 source yourself:
+**Building your own checkpoint** (optional):
 
 ```bash
-uv run python examples/build_checkpoint.py
+uv run python examples/build_checkpoint.py         # FP8
+uv run python examples/build_checkpoint_nvfp4.py   # NVFP4
 ```
 
-This streams shards one at a time, quantizes fused 3D MoE experts via
-`quantize_3d_to_fp8()`, and writes sharded FP8 output. Peaks ~18 GB
-RSS; never touches the GPU.
+Both stream shards one at a time, quantize fused 3D MoE experts, and
+write sharded output. Peak ~18 GB RSS; never touches the GPU.
 
 ### 2. Verify it loads and generates
 
 ```bash
-uv run python examples/quality_check.py
+uv run python examples/quality_check.py                          # defaults to fp8
+QUANT_FORMAT=nvfp4 uv run python examples/quality_check.py       # nvfp4 path
 ```
 
-Loads the FP8 checkpoint, runs three prompts (code, prose, mixed), and
+Loads the checkpoint, runs three prompts (code, prose, mixed), and
 fails fast on repetition loops, garbage tokens, or tok/s below a
 threshold. This is the smoke test to run after a fresh build.
 
 ### 3. Check a change hasn't broken parity
 
 ```bash
-uv run python examples/parity_check.py
+uv run python examples/parity_check.py                           # fp8
+QUANT_FORMAT=nvfp4 uv run python examples/parity_check.py        # nvfp4
 ```
 
 Generates 50 greedy tokens from a fixed prompt, diffs against a pinned
-baseline (`tests/fixtures/parity_baseline.txt`), and fails on >5% token
-divergence. If no baseline exists, the first run pins one. Use this as
-a regression canary when tweaking the decode path.
+per-format baseline (`tests/fixtures/parity_baseline_<format>.txt`), and
+fails on >5% token divergence. NVFP4 runs additionally report an
+informational delta vs the FP8 baseline. If no baseline exists, the
+first run pins one. Use this as a regression canary when tweaking the
+decode path.
+
+For longer-context coverage:
+
+```bash
+QUANT_FORMAT=nvfp4 uv run python examples/parity_long_check.py
+```
+
+This 2000-token gate crosses Gemma 4's 1024-token sliding window — any
+SWA-eviction bug surfaces here that the 50-token canary misses.
+Threshold: 0.5%.
 
 ### 4. Profile where time goes
 
@@ -268,35 +338,43 @@ of every script.
 
 ## Documentation
 
-Deep dives on the Gemma 4 FP8 work live in `docs/`:
+Deep dives on the Gemma 4 quantization work live in `docs/`:
 
 - [`docs/gemma4-fp8-results.md`](docs/gemma4-fp8-results.md) — why the
-  public checkpoints are broken, how the self-built checkpoint is
-  constructed, and the validation numbers (99.2% greedy-token match vs
-  bf16 reference).
+  public checkpoints are broken, how the FP8 checkpoint is constructed,
+  and the validation numbers (99.2% greedy-token match vs bf16 reference).
 - [`docs/gemma4-fp8-optimization.md`](docs/gemma4-fp8-optimization.md) —
   decode-path optimization log: what was tried, what shipped, what was
   rejected, and the active plan.
 - [`docs/gemma4-fp8-retrospective.md`](docs/gemma4-fp8-retrospective.md)
-  — retrospective on the build effort: what worked, what didn't,
+  — retrospective on the FP8 build effort: what worked, what didn't,
   lessons.
+- [`docs/2026-04-17-nvfp4-sm121-breakthrough.md`](docs/2026-04-17-nvfp4-sm121-breakthrough.md)
+  — NVFP4 on consumer Blackwell: native Triton `tl.dot_scaled` path,
+  3D fused-experts kernel, kernel-side expert gather, measured tok/s
+  progression across decode-optimization rounds.
 - [`docs/turboquant-gemma4-research.md`](docs/turboquant-gemma4-research.md)
   — background notes on TurboQuant KV cache compression with Gemma 4.
 
 ## Status and caveats
 
-- **Use the published checkpoint.** The pre-built FP8 checkpoint is at
-  [`aeyeops/gemma-4-26b-a4b-it-fp8`](https://huggingface.co/aeyeops/gemma-4-26b-a4b-it-fp8)
-  on the Hub. Google's own FP8/NVFP4 releases ship broken expert
-  weights — see `docs/gemma4-fp8-results.md` for why. You can also
-  build your own from the bf16 source via `examples/build_checkpoint.py`.
+- **Use the published checkpoints.** Both pre-built checkpoints are on
+  the Hub: [`aeyeops/gemma-4-26b-a4b-it-fp8`](https://huggingface.co/aeyeops/gemma-4-26b-a4b-it-fp8)
+  and [`aeyeops/gemma-4-26b-a4b-it-nvfp4`](https://huggingface.co/aeyeops/gemma-4-26b-a4b-it-nvfp4).
+  Google's own FP8/NVFP4 releases ship broken expert weights — see
+  `docs/gemma4-fp8-results.md` for why. You can also build your own from
+  the bf16 source via `examples/build_checkpoint.py` (FP8) or
+  `examples/build_checkpoint_nvfp4.py` (NVFP4).
 - **No pinned dependency versions.** `pyproject.toml` currently uses
   loose lower bounds. If something stops working, compare against the
   combination the docs were written against (`transformers 5.5.3`,
-  `compressed-tensors 0.15.0.1`, `turboquant 0.2.0`).
+  `compressed-tensors 0.15.0.1`, `turboquant 0.2.0`, `triton ≥ 3.5`).
 - **Single architecture.** Only Gemma 4 has a bridge today. The
   `core`/`gpu`/`plots` layers are model-agnostic — adding another
   architecture means writing a new `bridges/<model>/` module.
+- **NVFP4 path has not been tested on datacenter Blackwell** (`sm_100`,
+  B100/B200). The FP4 MMA encoding differs; consumer Blackwell
+  (`sm_120`/`sm_121`) is the validated target.
 - **Actively evolving.** The decode path and parity harness are being
   iterated on; see the active optimization plan linked from
   `docs/gemma4-fp8-optimization.md`.

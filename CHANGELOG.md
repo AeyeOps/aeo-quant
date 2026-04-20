@@ -2,6 +2,47 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.15] - 2026-04-20
+
+### Added
+
+- **Published NVFP4 checkpoint:
+  [`aeyeops/gemma-4-26b-a4b-it-nvfp4`](https://huggingface.co/aeyeops/gemma-4-26b-a4b-it-nvfp4).**
+  ~19 GB artifact (4 shards), 1133 tensors total — 180 NVFP4 buffers
+  (60 packed uint8 weights + 60 fp8_e4m3 per-block scales + 60 fp32
+  per-tensor scales across 30 MoE layers × 2 projections) plus 953 bf16
+  pass-through (attention, embeddings, norms, router, vision encoder).
+  Sits alongside the existing FP8 checkpoint as the second canonical
+  download-and-run artifact. License inherits Gemma terms from the base
+  model. Validated on GB10 Max Pro (Blackwell `sm_121`) with
+  `TRITON_OVERRIDE_ARCH=sm120`; byte-for-byte parity match vs pinned
+  baselines (0/50 and 0/300 mismatches); torch_alloc peak 17.49 GB.
+  Full model-card content + kernel-path description + limitations on
+  the Hub README.
+
+### Changed
+
+- **`README.md` dual-product restructure.** Hero, tagline, mermaid
+  diagram, SDK-at-a-glance tree, Quantization-bridges section,
+  Configuration section, Quickstart, Documentation, and Status/caveats
+  all now frame FP8 and NVFP4 as parallel canonical paths.
+  `QUANT_FORMAT` is documented as the single switch users need to know;
+  both `*_CHECKPOINT` env vars and both HF URLs are surfaced. Added
+  pointer to the new `docs/2026-04-17-nvfp4-sm121-breakthrough.md`
+  deep-dive.
+- **`examples/README.md`** updated in parallel. Every example's section
+  shows the default FP8 invocation and the `QUANT_FORMAT=nvfp4` variant.
+  Added missing entries for `parity_long_check.py`, `reasoning_check.py`,
+  and `build_checkpoint_nvfp4.py` (previously omitted from the docs
+  despite being part of the canonical set per `examples/CLAUDE.md`).
+
+### Fixed
+
+- **Version-string drift in `src/aeo_quant/__init__.py`** — was stuck at
+  `0.1.0` since the initial release while `pyproject.toml` tracked
+  forward through 14 releases. Drive-by sync fix: now `0.1.15`, matching
+  the package version.
+
 ## [0.1.14] - 2026-04-20
 
 ### Changed

@@ -380,9 +380,9 @@ is the durable plan — keep it updated with phase outcomes.
 ## Pointers
 
 **Working-style ground truth** lives in:
-- `/home/steve/.claude/CLAUDE.md` (global user directives — verbose bash, ask before
+- `~/.claude/CLAUDE.md` (global user directives — verbose bash, ask before
   heavy GPU, systems-check, GPU-only inference, etc.)
-- `/home/steve/.claude/projects/-opt-dev-aeo-aeo-quant/memory/MEMORY.md` (per-project
+- `~/.claude/projects/-opt-dev-aeo-aeo-quant/memory/MEMORY.md` (per-project
   feedback/project memory index)
 
 **Reference implementations already in-tree:**

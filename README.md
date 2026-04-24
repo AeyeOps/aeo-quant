@@ -201,7 +201,7 @@ Available extras (see `pyproject.toml`):
 | `bridges` | everything in `gpu` plus `transformers`, `accelerate`, `safetensors`, `turboquant` |
 | `plots` | `matplotlib` |
 | `all` | `bridges` + `plots` |
-| `dev` | `pytest`, `ruff` |
+| `dev` | `pytest`, `ruff`, `ty` |
 
 The `core` layer is stdlib-only and is always importable; the other
 layers are guarded behind `try/except ImportError` so `import aeo_quant`
@@ -459,10 +459,11 @@ Full disposition with CUDA-time measurements and kernel-level math:
   `docs/gemma4-fp8-results.md` for why. You can also build your own from
   the bf16 source via `examples/build_checkpoint.py` (FP8) or
   `examples/build_checkpoint_nvfp4.py` (NVFP4).
-- **No pinned dependency versions.** `pyproject.toml` currently uses
-  loose lower bounds. If something stops working, compare against the
-  combination the docs were written against (`transformers 5.5.3`,
-  `compressed-tensors 0.15.0.1`, `turboquant 0.2.0`, `triton ≥ 3.5`).
+- **No pinned dependency versions.** `pyproject.toml` uses loose lower
+  bounds and `uv.lock` pins concrete versions. If something stops
+  working, compare against the combination the current lockfile
+  captured (`transformers 5.6.2`, `turboquant 0.2.0`, `torch 2.11.0`,
+  `triton 3.6.0`, all validated on GB10 `sm_121` with CUDA 13.0).
 - **Single architecture.** Only Gemma 4 has a bridge today. The
   `core`/`gpu`/`plots` layers are model-agnostic — adding another
   architecture means writing a new `bridges/<model>/` module.

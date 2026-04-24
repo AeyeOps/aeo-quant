@@ -2,6 +2,101 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.16] - 2026-04-24
+
+Documentation, tooling, and lint/type-clean release. No functional
+product changes. NVFP4 decode throughput unchanged from v0.1.14 — the
+in-`transformers` optimization track is recorded as complete.
+
+### Added
+
+- **"Decode throughput journey" and "What we tried that didn't make the
+  cut" README sections.** 7-row tok/s progression table from the v0.1.0
+  bf16 dequant baseline (7.82) through v0.1.14's kernel-side expert
+  gather (~18.7) to the current 16–19 tok/s envelope, plus a grouped
+  inventory of rejected experiments (quality regressions, perf
+  no-change, not-significant) each pointing to the authoritative plan
+  or CHANGELOG writeup.
+- **`docs/plans/2026-04-23-in-transformers-envelope-closed.md`** —
+  closing writeup with the post-v0.1.14 CUDA-time breakdown and
+  disposition of the remaining probe-first levers (router NVFP4,
+  prefill autotune, MoE elementwise fusion — each <1 tok/s at envelope
+  noise floor).
+- **`ty`** (Astral's fast Python type checker, Beta) added to `[dev]`
+  extras. `ruff` floor bumped `0.8` → `0.15`.
+- **`PROFILE_MIN_FREE_GB` env knob** in `examples/profile_generate.py`
+  — override the 50 GB preflight floor when co-resident with another
+  workload (e.g. vLLM on the same GB10). Documented in README and
+  `examples/README.md` knobs lists.
+
+### Changed
+
+- **HF authentication guidance** in `README.md` and
+  `examples/README.md` rewritten. No aeo-quant code reads `HF_TOKEN`;
+  docs now direct users to `hf auth login` (token cached at
+  `~/.cache/huggingface/token`) and warn against re-adding `HF_TOKEN`
+  to `.env` (dual-copy rotation liability).
+- **"Actively evolving" README status caveat** replaced with explicit
+  envelope-closed language pointing at the closing writeup. The
+  harness surface, parity tooling, and dashboards continue to evolve.
+- **`docs/gemma4-fp8-optimization.md` description** in the Documentation
+  section marked as FP8-era log, superseded by the NVFP4 track.
+- **`multi_turn_16k.py` / `multi_turn_32k.py` dashboard titles** use
+  `QUANT_FORMAT` (format-aware) instead of hardcoded `"Gemma 4 FP8"`.
+- **`parity_long_check.py` docstring** no longer references a
+  pre-SWA-fix v0.1.9 commit hash as the baseline origin; replaced with
+  current-SWA-aware-cache description.
+- **`quality_check.py` `TOK_S_FLOOR`** raised 3.0 → 8.0. Matches the
+  v0.1.0 FP8 baseline — anything below our own starting point is
+  unambiguously a regression. The 3.0 floor was 5–6× looser than the
+  current 16–19 tok/s envelope.
+- **`uv` upgraded** 0.9.24 → 0.11.7.
+- **Full dependency refresh via `uv lock --upgrade`.** `transformers
+  5.5.4 → 5.6.2`, `huggingface-hub 1.10.1 → 1.11.0`, `pytest 8.x →
+  9.0.3`, plus minor/patch bumps (certifi, click, cuda-pathfinder,
+  filelock, idna, matplotlib, packaging, typer).
+- **Status/caveats dependency-reference versions** bumped to match
+  the current locked versions (`transformers 5.6.2`, `turboquant
+  0.2.0`, `torch 2.11.0`, `triton 3.6.0`, CUDA 13.0 on GB10 `sm_121`).
+
+### Fixed
+
+- **All 13 ruff findings resolved.** 9 auto-fixed (import sorting,
+  PEP 604 Optional syntax); 4 manual: `try/except/pass` →
+  `contextlib.suppress` in `streamer.py` and `writers.py`, collapsed
+  nested `if` in `config.py`, `if/else` block → ternary in
+  `nvfp4_matmul.py`.
+- **All 63 ty findings resolved.** Strategies:
+  - `nvfp4_matmul.py` excluded via `[tool.ty.src]` — ty can't model
+    Triton `tl.constexpr` and launch-time specialization.
+  - Class-level `torch.Tensor` annotations added to
+    `Gemma4TextExpertsFP8`, `Gemma4TextExpertsNVFP4`, and `LinearFP8`
+    to narrow PyTorch's `Module` generic attribute typing (removes
+    ~14 false positives).
+  - `OUTPUT_DIR: Path` narrowing in both `build_checkpoint*.py`
+    (separate `_OUTPUT_DIR_ENV` env read + explicit annotated `Path`
+    assignment).
+  - Legacy `BoolTensor/LongTensor/FloatTensor` signatures in
+    `gpu/memory.py` replaced with `torch.Tensor` (legacy aliases
+    don't round-trip through `torch.zeros/ones`).
+  - `core/types.py` `object` parameter types upgraded to
+    `Callable[..., Any]` / `Any`; redundant `# type: ignore` comments
+    removed.
+  - `matplotlib.Figure.tight_layout(rect=...)` list → tuple.
+  - Explicit None checks added in `Gemma4HybridTurboQuantCache` for
+    all four Optional tensor fields (was checking only
+    `_key_indices`).
+  - Targeted `# ty: ignore` on the two intentional class-swap lines
+    in `loader.py` and on the transformers 5.6+ cache-layer union
+    call in `cache.py`.
+  - Compatibility shim `np.trapz = np.trapezoid` (for turboquant
+    0.2.0 on numpy 2.x) gets `# ty: ignore[unresolved-attribute]`
+    alongside the existing mypy directive.
+- **`profile_generate.py` nsys conditional import** flagged `I001` +
+  `E501` under newly-installed ruff. Reformatted as a multi-line
+  import with `# noqa: I001` (ruff's isort can't model the
+  pre-torch-import placement required for nsys process wrapping).
+
 ## [0.1.15] - 2026-04-20
 
 ### Added

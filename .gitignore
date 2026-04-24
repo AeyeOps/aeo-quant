@@ -34,3 +34,9 @@ tmp/
 # Parity baselines (generated locally)
 tests/fixtures/parity_baseline*.txt
 tests/fixtures/parity_long_baseline*.txt
+
+# Stray logs and databases (preventive — nothing currently tracked)
+*.log
+*.sqlite
+*.sqlite3
+*.db

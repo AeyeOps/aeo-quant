@@ -13,7 +13,7 @@ gpu = ["torch>=2.4", "psutil>=5.9"]
 bridges = ["aeo-quant[gpu]", "transformers>=4.45", "accelerate>=0.30", "safetensors>=0.4", "turboquant>=0.2.0"]
 plots = ["matplotlib>=3.8", "openpyxl>=3.1"]
 all = ["aeo-quant[bridges]", "aeo-quant[plots]"]
-dev = ["pytest>=8.0", "ruff>=0.8"]
+dev = ["pytest>=8.0", "ruff>=0.15", "ty>=0.0.32,<0.1"]
 
 [project.scripts]
 aeo-harness = "aeo_quant.harness.cli:main"
@@ -41,3 +41,11 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ty.src]
+# Triton kernels use tl.constexpr and launch-time specialization that ty's
+# current type model can't represent (it flags legitimate constexpr args as
+# invalid). Exclude the file until upstream support lands.
+exclude = [
+    "src/aeo_quant/gpu/nvfp4_matmul.py",
+]

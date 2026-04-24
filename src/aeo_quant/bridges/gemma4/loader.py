@@ -37,7 +37,7 @@ def gemma4_experts_fp8_class_swap():
     state is recovered even if the wrapped code raises.
     """
     original = modeling_gemma4.Gemma4TextExperts
-    modeling_gemma4.Gemma4TextExperts = Gemma4TextExpertsFP8
+    modeling_gemma4.Gemma4TextExperts = Gemma4TextExpertsFP8  # ty: ignore[invalid-assignment]
     try:
         yield
     finally:
@@ -101,7 +101,7 @@ def load_gemma4_fp8(model_id_or_path, **from_pretrained_kwargs):
 def _gemma4_experts_nvfp4_class_swap():
     """Temporarily swap ``Gemma4TextExperts`` with ``Gemma4TextExpertsNVFP4``."""
     original = modeling_gemma4.Gemma4TextExperts
-    modeling_gemma4.Gemma4TextExperts = Gemma4TextExpertsNVFP4
+    modeling_gemma4.Gemma4TextExperts = Gemma4TextExpertsNVFP4  # ty: ignore[invalid-assignment]
     try:
         yield
     finally:

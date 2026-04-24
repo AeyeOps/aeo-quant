@@ -18,6 +18,7 @@ UX from those events.
 """
 from __future__ import annotations
 
+import contextlib
 import sys
 import time
 from collections.abc import Callable
@@ -304,7 +305,5 @@ class HarnessStreamer(LiveStreamer):
 
     def _emit_safe(self, event: dict) -> None:
         """Swallow emit errors — a broken callback must not kill generation."""
-        try:
+        with contextlib.suppress(Exception):
             self._emit(event)
-        except Exception:
-            pass

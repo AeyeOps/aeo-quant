@@ -25,7 +25,13 @@ import time
 # the process. If the switch is on but nsys isn't attached, re-exec under it
 # so the markers actually land in a trace. Run under nsys already -> skip.
 if os.environ.get("AEO_MOE_TRACE") == "1" and "NSYS_PROFILING_SESSION_ID" not in os.environ:
-    from aeo_quant.core.config import load_dotenv as _load_dotenv, quant_env as _quant_env, results_dir as _results_dir
+    # Conditional local import must precede torch/transformers so nsys re-exec
+    # can wrap the full process. Ruff's isort can't model this constraint.
+    from aeo_quant.core.config import (  # noqa: I001
+        load_dotenv as _load_dotenv,
+        quant_env as _quant_env,
+        results_dir as _results_dir,
+    )
     _load_dotenv()
     _fmt, _, _kv = _quant_env()
     _outdir = _results_dir("nsys", format=_fmt, kv_bits=_kv)
@@ -44,9 +50,12 @@ from aeo_quant.core.config import load_dotenv, quant_env, results_dir, setup_cud
 from aeo_quant.core.writers import Tee
 from aeo_quant.gpu.memory import CudaTimer, mem_report, preflight_memory
 
-# Memory budget (unified LPDDR5X on GB10): load ~30 GB + torch.compile warmup
-# ~10-15 GB + 5 GB safety. Fails fast if baseline is too high.
-MIN_FREE_GB = 50.0
+# Memory budget (unified LPDDR5X on GB10): model weights ~17-18 GB resident
+# (NVFP4 or FP8), plus profiler buffers, KV cache growth over GEN_TOKENS, and
+# headroom. 50 GB default assumes exclusive use of the SoC; set
+# PROFILE_MIN_FREE_GB=45 (or lower) when co-resident with another workload
+# (e.g. vLLM on the same GB10).
+MIN_FREE_GB = float(os.environ.get("PROFILE_MIN_FREE_GB", "50"))
 
 load_dotenv()
 setup_cuda_allocator()
@@ -276,6 +285,9 @@ def main() -> None:
     # Load model
     print(f"\n[load] tokenizer: {TOKENIZER_ID}")
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_ID)
+    # AutoTokenizer.from_pretrained() is typed as returning Optional; in practice
+    # it raises on failure rather than returning None. Assert for the type narrow.
+    assert tokenizer is not None
 
     print(f"[load] {QUANT_FORMAT.upper()} model: {CHECKPOINT}")
     t0 = time.time()

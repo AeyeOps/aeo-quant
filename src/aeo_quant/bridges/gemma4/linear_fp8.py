@@ -52,6 +52,12 @@ class LinearFP8(nn.Module):
     plus a fp32 scale buffer.
     """
 
+    # Class-level annotations narrow Module's generic attribute typing so
+    # static checkers see these as Tensors (not Tensor | Module).
+    weight: torch.Tensor
+    weight_scale: torch.Tensor
+    bias: torch.Tensor | None
+
     def __init__(self, in_features: int, out_features: int,
                  bias: bool = False, device=None):
         super().__init__()

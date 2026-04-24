@@ -47,15 +47,15 @@ VRAM_CAP_GB = float(os.environ.get("VRAM_CAP_GB", "90.0"))
 SOURCE_MODEL_ID = os.environ.get("SOURCE_MODEL", "google/gemma-4-26B-A4B-it")
 SHARD_SIZE_BYTES = 5 * 1024**3  # 5 GB target shard size
 
-OUTPUT_DIR = os.environ.get("NVFP4_CHECKPOINT")
-if not OUTPUT_DIR:
+_OUTPUT_DIR_ENV = os.environ.get("NVFP4_CHECKPOINT")
+if not _OUTPUT_DIR_ENV:
     print(
         "[FATAL] NVFP4_CHECKPOINT not set. Add it to .env -- this is where the "
         "output checkpoint will be written.",
         file=sys.stderr,
     )
     sys.exit(1)
-OUTPUT_DIR = Path(OUTPUT_DIR)
+OUTPUT_DIR: Path = Path(_OUTPUT_DIR_ENV)
 
 # Fused 3D expert weight pattern
 _EXPERT_RE = re.compile(

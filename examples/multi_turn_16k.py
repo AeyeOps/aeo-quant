@@ -218,7 +218,7 @@ def main() -> int:
     try:
         generate_dashboard(
             RESULTS_DIR,
-            title="Gemma 4 FP8 — Context Scaling (KV Cache Reuse)",
+            title=f"Gemma 4 {QUANT_FORMAT.upper()} — Context Scaling (KV Cache Reuse)",
         )
         print(f"[report] dashboard: {RESULTS_DIR / 'plots'}")
     except Exception as e:

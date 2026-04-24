@@ -44,8 +44,8 @@ from typing import Any
 
 import psutil
 import torch
-from aeo_quant.bridges.gemma4.cache import Gemma4HybridTurboQuantCache
 
+from aeo_quant.bridges.gemma4.cache import Gemma4HybridTurboQuantCache
 from aeo_quant.bridges.gemma4.parser import GEMMA4_PARSER
 from aeo_quant.bridges.gemma4.streamer import HarnessStreamer
 from aeo_quant.bridges.gemma4.template import incremental_turn_tokens

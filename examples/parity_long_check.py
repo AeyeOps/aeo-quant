@@ -8,8 +8,9 @@ sliding layers, so if SWA eviction breaks anything, this catches it. If parity
 holds at 2000 tokens, it holds at any length (the logic doesn't change past
 the first window crossing).
 
-Baseline must be established against the pre-fix cache (commit 11db2e8).
-Subsequent runs — with or without the new cache — must match bit-exact.
+The baseline captures the current SWA-aware cache behaviour on this
+format; subsequent runs must match bit-exact. Any divergence above
+the 0.5% threshold is a regression in the SWA eviction path.
 
 Usage:
     uv run examples/parity_long_check.py              # establish or diff baseline

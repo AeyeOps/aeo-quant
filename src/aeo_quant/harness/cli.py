@@ -34,7 +34,6 @@ from .client import (
 )
 from .protocol import PIDFILE_PATH, SOCKET_PATH
 
-
 # -- stray detection ------------------------------------------------------
 
 # A harness daemon is spawned as

@@ -39,6 +39,14 @@ class Gemma4TextExpertsFP8(Gemma4TextExperts):
     to avoid colliding with the gate_up_proj Parameter's name.
     """
 
+    # Class-level annotations narrow Module's generic attribute typing so
+    # static checkers see these as Tensors (not Tensor | Module).
+    gate_up_proj: torch.Tensor
+    gate_up_proj_scale: torch.Tensor
+    down_proj: torch.Tensor
+    down_proj_scale: torch.Tensor
+    num_experts: int
+
     def __init__(self, config):
         # Skip parent __init__'s bf16 Parameter allocation by calling
         # nn.Module.__init__ directly. We re-implement only the attributes

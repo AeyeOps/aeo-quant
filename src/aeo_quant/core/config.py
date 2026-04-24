@@ -67,9 +67,8 @@ def load_dotenv(path: str | Path = ".env", *, override: bool = True) -> int:
             value = value.split(" #", 1)[0].strip()
 
         # Strip surrounding quotes
-        if len(value) >= 2:
-            if (value[0] == '"' and value[-1] == '"') or (value[0] == "'" and value[-1] == "'"):
-                value = value[1:-1]
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
 
         if override or key not in os.environ:
             os.environ[key] = value

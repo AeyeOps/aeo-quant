@@ -15,7 +15,7 @@ layers) generalizes cleanly — when a second model family needs this, rename to
 """
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from turboquant import TurboQuantCache
@@ -52,7 +52,7 @@ class TurboQuantSlidingLayer(TurboQuantLayer):
         self,
         key_states: torch.Tensor,
         value_states: torch.Tensor,
-        cache_kwargs: Optional[dict[str, Any]] = None,
+        cache_kwargs: dict[str, Any] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         keys, values = super().update(key_states, value_states, cache_kwargs)
 
@@ -68,6 +68,9 @@ class TurboQuantSlidingLayer(TurboQuantLayer):
         # before touching ``shape[-2]``.
         if (
             self._key_indices is not None
+            and self._key_norms is not None
+            and self._value_indices is not None
+            and self._value_norms is not None
             and self._key_indices.numel() > 0
             and self._key_indices.shape[-2] > self._compressed_cap
         ):
@@ -168,7 +171,7 @@ class Gemma4HybridTurboQuantCache(TurboQuantCache):
         key_states: torch.Tensor,
         value_states: torch.Tensor,
         layer_idx: int,
-        cache_kwargs: Optional[dict[str, Any]] = None,
+        cache_kwargs: dict[str, Any] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Defensive: inherited TurboQuantCache.update lazy-appends a vanilla
         # TurboQuantLayer when layer_idx is out of range, which would silently
@@ -179,4 +182,8 @@ class Gemma4HybridTurboQuantCache(TurboQuantCache):
                 f"({len(self.layers)}). This cache is shape-locked to the "
                 "model config passed at construction."
             )
-        return self.layers[layer_idx].update(key_states, value_states, cache_kwargs)
+        # This cache only populates self.layers with TurboQuantLayer subclasses,
+        # which inherit from CacheLayerMixin and define .update(...). ty sees
+        # transformers 5.6+'s LinearAttentionCacheLayerMixin as a possibility in
+        # the union and flags the call.
+        return self.layers[layer_idx].update(key_states, value_states, cache_kwargs)  # ty: ignore[unresolved-attribute]

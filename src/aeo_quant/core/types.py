@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import re
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Exit codes
@@ -221,12 +223,12 @@ class Monitor(threading.Thread):
 
     def __init__(
         self,
-        csv_writer: object,  # CSVWriter from .writers
+        csv_writer: Any,  # CSVWriter from .writers (Any avoids a circular import)
         kill_state: KillState,
         swap_baseline_mib: int,
         *,
         container_name: str,
-        sample_fn: object | None = None,
+        sample_fn: Callable[..., Any] | None = None,
         monitor_interval_s: float = 0.5,
         heartbeat_interval_s: float = 15.0,
         docker_stats_interval_s: float = 5.0,
@@ -277,18 +279,18 @@ class Monitor(threading.Thread):
 
     def _sample_once(
         self,
-        read_free_m_fn: object,
-        read_latest_vllm_log_match_fn: object,
-        read_docker_stats_rss_mib_fn: object,
+        read_free_m_fn: Callable[..., Any],
+        read_latest_vllm_log_match_fn: Callable[..., Any],
+        read_docker_stats_rss_mib_fn: Callable[..., Any],
     ) -> None:
         import time
 
         now = time.time()
-        used, available, swap = read_free_m_fn()  # type: ignore[operator]
-        log = read_latest_vllm_log_match_fn(self.container_name)  # type: ignore[operator]
+        used, available, swap = read_free_m_fn()
+        log = read_latest_vllm_log_match_fn(self.container_name)
 
         if now - self._last_docker_stats >= self.docker_stats_interval_s:
-            self._cached_rss = read_docker_stats_rss_mib_fn(self.container_name)  # type: ignore[operator]
+            self._cached_rss = read_docker_stats_rss_mib_fn(self.container_name)
             self._last_docker_stats = now
 
         sample = Sample(
@@ -318,7 +320,7 @@ class Monitor(threading.Thread):
             if sample.kv_pct is not None and sample.kv_pct > self.peak_kv_pct:
                 self.peak_kv_pct = sample.kv_pct
 
-        self.csv_writer.write(  # type: ignore[union-attr]
+        self.csv_writer.write(
             {
                 "ts": iso(sample.ts),
                 "used_mib": sample.used_mib,

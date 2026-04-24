@@ -220,9 +220,13 @@ QUANT_FORMAT=nvfp4
 # Checkpoints (HF repo ID or local path). Set whichever you use.
 FP8_CHECKPOINT=aeyeops/gemma-4-26b-a4b-it-fp8
 NVFP4_CHECKPOINT=aeyeops/gemma-4-26b-a4b-it-nvfp4
-
-HF_TOKEN=hf_your_token_here
 ```
+
+For HuggingFace authentication, run `hf auth login` once. The token is
+cached at `~/.cache/huggingface/token` and both the `hf` CLI and
+`huggingface_hub` pick it up automatically — no `HF_TOKEN` env var
+needed. Don't put `HF_TOKEN` in `.env`: it would shadow the cached
+token and force a second place to rotate on a leak.
 
 `quant_env()` resolves `QUANT_FORMAT` + the matching `*_CHECKPOINT` and
 (for nvfp4) auto-applies `TRITON_OVERRIDE_ARCH=sm120` before Triton
@@ -315,10 +319,11 @@ tokenize / prefill / decode separately, then (optionally) a
 `torch.profiler` trace sorted by CUDA time. Useful environment knobs:
 
 ```bash
-PROFILE_TRACE=1  uv run python examples/profile_generate.py   # include kernel trace
-COMPARE_KV=1     uv run python examples/profile_generate.py   # TurboQuant vs native cache
-GEN_TOKENS=200   uv run python examples/profile_generate.py   # longer measurement
-AEO_MOE_TRACE=1  uv run python examples/profile_generate.py   # auto-wrap under nsys with NVTX markers
+PROFILE_TRACE=1        uv run python examples/profile_generate.py   # include kernel trace
+COMPARE_KV=1           uv run python examples/profile_generate.py   # TurboQuant vs native cache
+GEN_TOKENS=200         uv run python examples/profile_generate.py   # longer measurement
+AEO_MOE_TRACE=1        uv run python examples/profile_generate.py   # auto-wrap under nsys with NVTX markers
+PROFILE_MIN_FREE_GB=45 uv run python examples/profile_generate.py   # relax preflight floor when co-resident with vLLM etc.
 ```
 
 ### 5. Run a multi-turn benchmark
@@ -344,8 +349,11 @@ Deep dives on the Gemma 4 quantization work live in `docs/`:
   public checkpoints are broken, how the FP8 checkpoint is constructed,
   and the validation numbers (99.2% greedy-token match vs bf16 reference).
 - [`docs/gemma4-fp8-optimization.md`](docs/gemma4-fp8-optimization.md) —
-  decode-path optimization log: what was tried, what shipped, what was
-  rejected, and the active plan.
+  FP8-era decode-path optimization log: what was tried, what shipped,
+  what was rejected. Superseded by the NVFP4 track; see the
+  `docs/plans/` dated writeups and
+  [`docs/plans/2026-04-23-in-transformers-envelope-closed.md`](docs/plans/2026-04-23-in-transformers-envelope-closed.md)
+  for the current state.
 - [`docs/gemma4-fp8-retrospective.md`](docs/gemma4-fp8-retrospective.md)
   — retrospective on the FP8 build effort: what worked, what didn't,
   lessons.
@@ -355,6 +363,92 @@ Deep dives on the Gemma 4 quantization work live in `docs/`:
   progression across decode-optimization rounds.
 - [`docs/turboquant-gemma4-research.md`](docs/turboquant-gemma4-research.md)
   — background notes on TurboQuant KV cache compression with Gemma 4.
+
+## Decode throughput journey
+
+Three weeks of incremental optimization on Gemma 4 26B-A4B (GB10
+`sm_121`, TurboQuant KV). Headline decode tok/s by milestone:
+
+| Milestone | Decode tok/s |
+|---|--:|
+| v0.1.0 — FP8 bridge, bf16 dequant baseline | 7.82 |
+| v0.1.0 — FP8 bridge, `torch._scaled_mm` | 8.96 |
+| v0.1.4 — NVFP4 load-time path, per-expert loop | ~6.8 |
+| 2026-04-17 — 3D fused-experts Triton kernel | ~12.5–13.7 |
+| v0.1.12 — Host-sync removal, cached FP4 bounds | ~15.8 |
+| v0.1.14 — Kernel-side expert gather for MoE decode | ~18.7 |
+| 2026-04-23 — In-`transformers` envelope | 16–19 |
+
+Measurement setups vary across releases (prompt length, decode
+window); per-release detail in [`CHANGELOG.md`](CHANGELOG.md). Closing
+writeup with post-0.1.14 CUDA-time breakdown:
+[`docs/plans/2026-04-23-in-transformers-envelope-closed.md`](docs/plans/2026-04-23-in-transformers-envelope-closed.md).
+
+## What we tried that didn't make the cut
+
+For anyone using this as a reference: the optimization track has a
+matching list of dead ends, each a full implement-and-measure exercise
+rather than a back-of-the-envelope rejection.
+
+**Quality regressions**
+
+- **FP8 on the 206 non-MoE Linears.** −840 MB VRAM, but 0% decode
+  speedup and 46% parity divergence; per-row scale was the failure
+  mode. MoE-only FP8 stayed the shipped configuration. See
+  `CHANGELOG.md` v0.1.1.
+- **NVFP4 on attention projections + `lm_head`** (116 modules). 88%
+  token divergence at decode step 5; FP4's ~13% per-matmul RMS noise
+  floor compounds past argmax tolerance on Gemma 4's 262K vocab — the
+  math is fundamental, not a code defect. See
+  [`docs/plans/2026-04-20-cuda-graph-handoff.md`](docs/plans/2026-04-20-cuda-graph-handoff.md).
+- **3-bit KV cache as default.** Produces correct reasoning at 3-bit
+  but 86–98% token divergence vs 4-bit from cascade through the
+  attention stack, and no decode speedup. 4-bit stays default below
+  128K context. See `CHANGELOG.md` v0.1.2.
+
+**Performance no change or worse**
+
+- **Fixed-buffer capturable KV cache** (for `torch.cuda.graph` capture
+  of the decode step). Both our V1 implementation and HF's
+  `StaticCache` diverged identically from `Gemma4HybridTurboQuantCache`
+  at decode step 49 — fixed-buffer / zero-padded K/V is not
+  numerically equivalent to the hybrid cache under HF's attention
+  path. Cache-level graph capture is blocked on this model. See
+  [`docs/plans/2026-04-20-cuda-graph-handoff.md`](docs/plans/2026-04-20-cuda-graph-handoff.md).
+- **`torch.compile(mode="reduce-overhead")`** in the loader. No-op via
+  `transformers.generate()` (HF bypasses `OptimizedModule.__call__`),
+  and actively harmful on direct `model(...)` calls — `cudagraph_trees`
+  conflicts with our cache growth and with explicit graph capture.
+  Stripped in v0.1.13.
+- **`.fp8_cache/` conversion sidecar.** Intended to skip 30–60s
+  NVFP4→FP8 conversion on subsequent loads. After the batched-16-
+  experts optimization brought conversion to ~10s, the cache's ~124s
+  disk I/O was consistently ~114s *slower* than just reconverting.
+  Removed in v0.1.5.
+- **Routing batching** (`bmm` and packed expert variants). On GB10 at
+  M=1 decode, the eager Python expert loop beat every batched variant
+  we wrote. Launch overhead wasn't the bottleneck we assumed it was
+  until the 3D fused-experts Triton kernel attacked it from a
+  different angle.
+
+**Not a significant improvement**
+
+Three "probe-first" levers from the post-v0.1.14 inventory were
+dispositioned without a full probe because the trace made the upper
+bound unambiguous:
+
+- **Router NVFP4** — the existing 2D `_nvfp4_matmul_kernel` already
+  accounts for 1.12% of CUDA time; residual bf16 router work isn't a
+  distinct bucket in the top-40. Upper bound on gain ≪ 1% wall-clock.
+- **Per-shape prefill autotune** — prefill is 5.5% of total wall-clock;
+  a 3× prefill speedup nets ~0.55 tok/s and doesn't move the decode
+  headline.
+- **MoE activation-quant elementwise fusion** — ~8% of CUDA time;
+  fusion best case 2–3% wall-clock, or 0.3–0.5 tok/s at current
+  rates. Inside envelope noise.
+
+Full disposition with CUDA-time measurements and kernel-level math:
+[`docs/plans/2026-04-23-in-transformers-envelope-closed.md`](docs/plans/2026-04-23-in-transformers-envelope-closed.md).
 
 ## Status and caveats
 
@@ -375,9 +469,13 @@ Deep dives on the Gemma 4 quantization work live in `docs/`:
 - **NVFP4 path has not been tested on datacenter Blackwell** (`sm_100`,
   B100/B200). The FP4 MMA encoding differs; consumer Blackwell
   (`sm_120`/`sm_121`) is the validated target.
-- **Actively evolving.** The decode path and parity harness are being
-  iterated on; see the active optimization plan linked from
-  `docs/gemma4-fp8-optimization.md`.
+- **NVFP4 decode is at the in-`transformers` envelope** — 16–19 tok/s
+  on GB10 depending on prompt. Further speedup requires a different
+  inference substrate (vLLM, TRT-LLM, etc.), not more tuning inside
+  `transformers.generate()`; see
+  [`docs/plans/2026-04-23-in-transformers-envelope-closed.md`](docs/plans/2026-04-23-in-transformers-envelope-closed.md)
+  for the closing writeup with CUDA-time breakdown. The harness
+  surface, parity tooling, and dashboards continue to evolve.
 
 ## License
 

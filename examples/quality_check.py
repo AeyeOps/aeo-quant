@@ -6,7 +6,7 @@ format was requested at daemon start; this script enforces a format-match
 against ``QUANT_FORMAT`` before running, so switching formats is explicit.
 
 Loads nothing in-process; dispatches the ``quality`` workload, prints each
-response, runs ``check_output_coherent`` + a tok/s >= 3.0 gate on the client
+response, runs ``check_output_coherent`` + a tok/s >= 8.0 gate on the client
 side, and fails fast on any prompt that regresses.
 
 Usage:
@@ -33,7 +33,9 @@ setup_cuda_allocator()
 
 QUANT_FORMAT, CHECKPOINT, KV_BITS = quant_env()
 MAX_NEW_TOKENS = 512
-TOK_S_FLOOR = 3.0
+# Per-prompt throughput floor. Set at the v0.1.0 FP8 baseline (8.96 tok/s) —
+# anything below our own starting point is unambiguously a regression.
+TOK_S_FLOOR = 8.0
 
 
 def _on_event(event: dict) -> None:

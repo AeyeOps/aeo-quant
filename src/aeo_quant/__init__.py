@@ -6,7 +6,7 @@ __version__ = "0.1.15"
 try:
     import numpy as np
     if not hasattr(np, "trapz"):
-        np.trapz = np.trapezoid  # type: ignore[attr-defined]
+        np.trapz = np.trapezoid  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
 except ImportError:
     pass  # numpy not installed
 

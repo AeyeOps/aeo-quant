@@ -34,7 +34,6 @@ from transformers.models.gemma4.modeling_gemma4 import Gemma4TextExperts
 
 from aeo_quant.gpu.quant import NVFP4_BLOCK_SIZE
 
-
 _MOE_TRACE = os.environ.get("AEO_MOE_TRACE") == "1"
 
 
@@ -53,6 +52,16 @@ class Gemma4TextExpertsNVFP4(Gemma4TextExperts):
     paths run the FP4 weights through our Triton ``tl.dot_scaled``
     kernel with no dequantization round trip.
     """
+
+    # Class-level annotations narrow Module's generic attribute typing so
+    # static checkers see these as Tensors (not Tensor | Module).
+    gate_up_proj: torch.Tensor
+    gate_up_proj_scale: torch.Tensor
+    gate_up_proj_scale_2: torch.Tensor
+    down_proj: torch.Tensor
+    down_proj_scale: torch.Tensor
+    down_proj_scale_2: torch.Tensor
+    num_experts: int
 
     def __init__(self, config):
         nn.Module.__init__(self)

@@ -5,6 +5,7 @@ Stdlib only — no third-party dependencies.
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import json
 import threading
@@ -50,10 +51,8 @@ class Tee:
 
     def flush(self):
         for s in self.streams:
-            try:
+            with contextlib.suppress(ValueError, OSError):
                 s.flush()
-            except (ValueError, OSError):
-                pass
 
 
 class JSONLWriter:

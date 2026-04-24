@@ -194,7 +194,7 @@ def generate_dashboard(
     plot_thinking_ratio(axes[1, 0], all_runs)
     plot_time_per_turn(axes[1, 1], all_runs)
 
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
     out = output_dir / "combined_dashboard.png"
     fig.savefig(out, dpi=150)
     plt.close(fig)

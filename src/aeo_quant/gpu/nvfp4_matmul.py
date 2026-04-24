@@ -33,7 +33,6 @@ import torch
 import triton
 import triton.language as tl
 
-
 # -----------------------------------------------------------------------------
 # Kernel
 # -----------------------------------------------------------------------------
@@ -517,11 +516,7 @@ def nvfp4_linear_prequantized(
         num_warps=NUM_WARPS,
     )
 
-    if M_padded != M:
-        c = c_padded[:M]
-    else:
-        c = c_padded
-    return c
+    return c_padded[:M] if M_padded != M else c_padded
 
 
 def nvfp4_linear_3d_prequantized(

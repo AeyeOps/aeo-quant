@@ -153,7 +153,7 @@ class MemoryCapStoppingCriteria:
         self._tokens_since_check = 0
         self.peak_seen_gb = 0.0
 
-    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> torch.BoolTensor:
+    def __call__(self, input_ids: torch.Tensor, scores: torch.Tensor, **kwargs) -> torch.Tensor:
         batch_size = input_ids.shape[0]
         self._tokens_since_check += 1
         if self._tokens_since_check < self.check_every_n:

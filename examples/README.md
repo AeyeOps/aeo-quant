@@ -15,9 +15,12 @@ QUANT_FORMAT=nvfp4
 # Set the matching checkpoint (HF repo ID or local path).
 FP8_CHECKPOINT=aeyeops/gemma-4-26b-a4b-it-fp8
 NVFP4_CHECKPOINT=aeyeops/gemma-4-26b-a4b-it-nvfp4
-
-HF_TOKEN=hf_your_token_here
 ```
+
+For HuggingFace authentication, run `hf auth login` once — the token is
+cached at `~/.cache/huggingface/token` and the loader picks it up
+automatically. Don't put `HF_TOKEN` in `.env`: it would shadow the
+cached token and force a second place to rotate on a leak.
 
 `quant_env()` routes to the matching `*_CHECKPOINT` and (for nvfp4) auto-applies
 the `TRITON_OVERRIDE_ARCH=sm120` Triton quirk. `KV_BITS` defaults to 4 for FP8
@@ -148,10 +151,11 @@ Produces two things:
 Run it after a benchmark, not during (it needs the GPU). Useful knobs:
 
 ```bash
-COMPARE_KV=1     uv run python examples/profile_generate.py   # TurboQuant vs native cache
-PROFILE_TRACE=1  uv run python examples/profile_generate.py   # include kernel-level trace
-GEN_TOKENS=200   uv run python examples/profile_generate.py   # longer measurement
-AEO_MOE_TRACE=1  uv run python examples/profile_generate.py   # auto-wrap under nsys with NVTX markers
+COMPARE_KV=1           uv run python examples/profile_generate.py   # TurboQuant vs native cache
+PROFILE_TRACE=1        uv run python examples/profile_generate.py   # include kernel-level trace
+GEN_TOKENS=200         uv run python examples/profile_generate.py   # longer measurement
+AEO_MOE_TRACE=1        uv run python examples/profile_generate.py   # auto-wrap under nsys with NVTX markers
+PROFILE_MIN_FREE_GB=45 uv run python examples/profile_generate.py   # relax preflight floor when co-resident with vLLM etc.
 ```
 
 Results go to `results/profiling/<format>-<bits>bit-<timestamp>/` (timing +

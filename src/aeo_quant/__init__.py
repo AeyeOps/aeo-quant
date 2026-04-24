@@ -1,6 +1,6 @@
 """AeyeOps quantization toolkit — model evaluation, benchmarking, and quantization bridges."""
 
-__version__ = "0.1.16"
+__version__ = "0.1.17"
 
 # Compat shim: turboquant 0.2.0 uses np.trapz, removed in numpy 2.x
 try:

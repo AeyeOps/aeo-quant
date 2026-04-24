@@ -109,7 +109,7 @@ def quant_env() -> tuple[str, Path, int]:
 
     Returns:
         ``(quant_format, checkpoint_path, kv_bits)`` where:
-          - ``quant_format``: ``"fp8"`` (default) or ``"nvfp4"``
+          - ``quant_format``: ``"fp8"`` or ``"nvfp4"``, required (no default)
           - ``checkpoint_path``: resolved from ``CHECKPOINT``, ``FP8_CHECKPOINT``,
             or ``NVFP4_CHECKPOINT`` depending on format
           - ``kv_bits``: from ``KV_BITS`` env var (default 4 for fp8, 3 for nvfp4)
@@ -117,11 +117,29 @@ def quant_env() -> tuple[str, Path, int]:
     Side effect for nvfp4: calls :func:`ensure_nvfp4_triton_arch` so
     the user doesn't have to remember the sm_121-Triton quirk.
 
-    Calls ``sys.exit(1)`` if no checkpoint path is found.
+    Calls ``sys.exit(1)`` on any misconfiguration: unset or
+    unrecognized ``QUANT_FORMAT``, or no checkpoint path resolvable.
+    No silent defaults — the format must be declared explicitly so a
+    typo or missing setting fails immediately instead of loading the
+    wrong checkpoint.
     """
     import sys
 
-    fmt = os.environ.get("QUANT_FORMAT", "fp8")
+    fmt = os.environ.get("QUANT_FORMAT")
+    if not fmt:
+        print(
+            "[FATAL] QUANT_FORMAT is not set. Set it to 'fp8' or 'nvfp4' "
+            "in .env or as an env var.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if fmt not in ("fp8", "nvfp4"):
+        print(
+            f"[FATAL] QUANT_FORMAT={fmt!r} is not recognized. "
+            f"Expected 'fp8' or 'nvfp4'. Check .env for typos.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     ckpt = os.environ.get("CHECKPOINT") or os.environ.get(
         "NVFP4_CHECKPOINT" if fmt == "nvfp4" else "FP8_CHECKPOINT"
     )

@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.17] - 2026-04-24
+
+Fail-fast hardening on `QUANT_FORMAT` resolution. Caught while running
+the post-dep-refresh validation suite when a `.env` typo
+(`QUANT_FORMAT=fpnv4`) silently loaded the FP8 checkpoint instead of
+NVFP4 and wasted two minutes of model load before anyone noticed.
+
+### Fixed
+
+- **`quant_env()` no longer silently defaults or falls through on a
+  bad `QUANT_FORMAT`.** Previously an unset value defaulted to `"fp8"`
+  and any unrecognized string (typo, garbage) was silently accepted
+  and routed to the FP8 checkpoint path, because the resolution used
+  a ternary that picked `NVFP4_CHECKPOINT` only on exact `"nvfp4"`
+  match and `FP8_CHECKPOINT` otherwise. Now both paths hard-fail with
+  `sys.exit(1)` and a remediation message:
+  - Unset: `[FATAL] QUANT_FORMAT is not set. Set it to 'fp8' or
+    'nvfp4' in .env or as an env var.`
+  - Unrecognized: `[FATAL] QUANT_FORMAT={value!r} is not recognized.
+    Expected 'fp8' or 'nvfp4'. Check .env for typos.`
+  A typo now fails in milliseconds instead of 2+ minutes into the
+  wrong model load. Matches the existing fail-fast pattern already
+  used for the missing-checkpoint case at `config.py:128`.
+
 ## [0.1.16] - 2026-04-24
 
 Documentation, tooling, and lint/type-clean release. No functional
